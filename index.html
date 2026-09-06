@@ -96,26 +96,69 @@
   ];
 
   // 障碍定义。solid=true 表示实体阻挡（撞上被挡住不扣血），dmg=true 表示扣血。
+  // unlock = 从第几关开始出现（意见④：难度随闯关次数逐渐加强，新障碍分档解锁）。
   const HAZARDS = {
     spike:      { w: 42,  h: 30,  dmg: true,  solid: false },
     spikeFloor: { w: 100, h: 26,  dmg: true,  solid: false },
     gear:       { r: 26,           dmg: true,  solid: false },
-    saw:        { r: 26,           dmg: true,  solid: false },
-    fire:       { w: 38,  h: 56,  dmg: true,  solid: false, cycle: 2.4, safeRatio: 0.60 },
-    patrol:     { w: 40,  h: 40,  dmg: true,  solid: false },
-    gate:       { w: 22,  h: 104, dmg: false, solid: true,  cycle: 2.4, openRatio: 0.45 },
-    slider:     { w: 38,  h: 38,  dmg: true,  solid: false },
+    saw:        { r: 26,           dmg: true,  solid: false, unlock: 3 },
+    fire:       { w: 38,  h: 56,  dmg: true,  solid: false, cycle: 2.4, safeRatio: 0.60, unlock: 3 },
+    patrol:     { w: 40,  h: 40,  dmg: true,  solid: false, unlock: 2 },
+    gate:       { w: 22,  h: 104, dmg: false, solid: true,  cycle: 2.4, openRatio: 0.45, unlock: 5 },
+    slider:     { w: 38,  h: 38,  dmg: true,  solid: false, unlock: 4 },
+    // 意见④：上下移动的三角形齿轮（第 4 关解锁）
+    triGear:    { r: 24,           dmg: true,  solid: false, unlock: 4 },
+    // 意见④：挡路的大个子小怪兽，站得稳、块头大，必须跳过去（第 6 关解锁）
+    blocker:    { w: 60,  h: 52,  dmg: true,  solid: false, unlock: 6 },
   };
   const HAZARD_KEYS = Object.keys(HAZARDS);
+
+  // 装饰品（意见②）：礼物攒到 need 即解锁。确定性解锁表——孩子数着礼物就能
+  // 预期下一件是什么，比随机开箱更适合低龄玩家。slot 决定穿戴位置。
+  const ACCESSORIES = [
+    { id: 'glasses',  name: '小墨镜',   slot: 'glasses', need: 8 },
+    { id: 'cap',      name: '小红帽',   slot: 'hat',     need: 15 },
+    { id: 'scarf',    name: '红围巾',   slot: 'neck',    need: 24 },
+    { id: 'bowknot',  name: '蝴蝶结',   slot: 'hat',     need: 34 },
+    { id: 'starGlass',name: '星星眼镜', slot: 'glasses', need: 45 },
+    { id: 'crown',    name: '皇冠',     slot: 'hat',     need: 60 },
+    { id: 'cape',     name: '小披风',   slot: 'neck',    need: 80 },
+  ];
+
+  // 成就定义（留存系统）：id + 名称 + 触发条件描述。unlock 逻辑见 unlockAchievement。
+  const ACHIEVEMENTS = [
+    { id: 'firstClear',  icon: '🏆', name: '初次通关',   desc: '通过第 1 关' },
+    { id: 'clear10',     icon: '🚩', name: '闯关达人',   desc: '通过第 10 关' },
+    { id: 'gift50',      icon: '🎁', name: '收藏家',     desc: '累计收集 50 件礼物' },
+    { id: 'noHit',       icon: '💫', name: '毫发无伤',   desc: '一整关一次都不受伤' },
+    { id: 'combo5',      icon: '🔥', name: '连击高手',   desc: '单关连击达到 5 次' },
+    { id: 'gradeS',      icon: '⭐', name: '满分达人',   desc: '一关拿到 S 评级' },
+    { id: 'play20',      icon: '🎮', name: '老玩家',     desc: '累计挑战 20 局' },
+    { id: 'house3',      icon: '🏠', name: '有房一族',   desc: '建成大房子（完美通关 3 关）' },
+  ];
 
   /* ===========================================================================
    * 3. 小工具
    * ======================================================================== */
-  function rand(a, b) { return a + Math.random() * (b - a); }
-  function ri(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+  // 可替换随机源（每日挑战用日期 seed 固定关卡；普通模式用真随机）
+  let rng = Math.random;
+  function seededRng(seed) {
+    let s = (seed >>> 0) || 1;
+    return function () {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff;
+    };
+  }
+  function hashStr(str) {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function rand(a, b) { return a + rng() * (b - a); }
+  function ri(a, b) { return Math.floor(a + rng() * (b - a + 1)); }
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, t) { return a + (b - a) * t; }
-  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+  function pick(arr) { return arr[Math.floor(rng() * arr.length)]; }
   function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
     return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
   }
@@ -156,6 +199,16 @@
     /* ---------- 存档 ---------- */
     const SKEY = 'petadv.save.v1';
     const save = storage.get(SKEY, { best: 1, gifts: 0, pet: 'cat', runs: 0 });
+    // 意见② 新字段：acc 已拥有的装饰品 id 列表 / eq 当前穿戴 / house 房子进度 0-3。
+    // 留存系统字段：bestScore 单关最高分 / scores 排行榜 top10 / achievements 成就 / dailyBest 每日挑战。
+    // 旧存档没有这些字段，这里统一补默认值（旧档不丢）。
+    if (!Array.isArray(save.acc)) save.acc = [];
+    if (!save.eq) save.eq = { hat: '', glasses: '', neck: '' };
+    if (!save.house) save.house = 0;
+    if (!save.bestScore) save.bestScore = 0;
+    if (!Array.isArray(save.scores)) save.scores = [];
+    if (!save.achievements) save.achievements = {};
+    if (!save.dailyBest) save.dailyBest = {};
     function persist() { storage.set(SKEY, save); }
 
     /* ---------- 运行时状态 ---------- */
@@ -180,10 +233,46 @@
     let checkpoint = { x: 90, y: GROUND_BASE - 50 };
     let revivesUsed = 0;
     let comboCount = 0;    // 连续无伤吃星
+    let runClean = true;   // 意见②：本关是否一次都没受伤（完美通关攒房子）
+    let runScore = 0;      // 本关得分（评分系统）
+    let runCombo = 0;      // 本关最大连击
+    let runGrade = null;   // 本关评级 { g, color, label }（过关结算后写入）
+    let dailyMode = false; // 每日挑战模式：用日期 seed 固定关卡
+    let dailyKey = '';     // 今日日期 key（YYYYMMDD）
     let coyote = 0, jumpBuffer = 0, jumpHeld = false, jumpFrames = 0;
     let screenFlash = 0;
     let bannerMsg = '';
     let bannerT = 0;
+    let pendingUnlock = null;   // 意见②：本关开出的装饰品（cleared 界面展示）
+    let petAction = '';         // 小屋动作：'' | tv | eat | sleep
+    let roomVisitUsed = false;  // 本次 room 是否已触发过互动提示
+
+    /* ---------- BGM 接线（意见③）：防御 stub sfx 没有这两个方法 ---------- */
+    function startBgm(idx) {
+      if (sfx && sfx.startBgm) { try { sfx.startBgm(idx); } catch (e) {} }
+    }
+    function stopBgm() {
+      if (sfx && sfx.stopBgm) { try { sfx.stopBgm(); } catch (e) {} }
+    }
+
+    /* ---------- 评分 & 成就（留存系统） ---------- */
+    // 分数构成：通关 100 + 每星 30 + 连击加成(combo-1)*5 + 无伤 50。
+    // 满分 ≈ 255（全星+无伤+满连击）。评级映射：
+    //   S ≥ 230  完美     A ≥ 180  太棒了   B ≥ 130  不错   C < 130  继续加油
+    function gradeFor(score) {
+      if (score >= 230) return { g: 'S', color: '#ffd24a', label: '完美！' };
+      if (score >= 180) return { g: 'A', color: '#7afcff', label: '太棒了' };
+      if (score >= 130) return { g: 'B', color: '#9af29a', label: '不错' };
+      return { g: 'C', color: '#c9c9c9', label: '继续加油' };
+    }
+    let achievementToastT = 0;   // 成就解锁弹窗倒计时
+    function unlockAchievement(id) {
+      if (save.achievements[id]) return;
+      save.achievements[id] = Date.now();
+      const a = ACHIEVEMENTS.find(function (x) { return x.id === id; });
+      if (a) { toast('成就解锁：' + a.icon + ' ' + a.name + '！'); }
+      persist();
+    }
 
     /* ---------- 输入 ---------- */
     const input = { left: false, right: false, jump: false };
@@ -221,7 +310,12 @@
       theme = THEMES[(lv - 1) % THEMES.length];
       vehicle = VEHICLES[(lv - 1) % VEHICLES.length];
 
-      levelWidth = 2400 + lv * 150;
+      // 每日挑战用固定 seed 随机源；普通模式恢复真随机（保证每次都不一样）
+      if (!dailyMode) rng = Math.random;
+
+      // 意见④：路要很长——第 1 关约 3500px，之后每关 +300。
+      // [PLACEHOLDER] 目标单局 30-60s，等 playtest 实测均速后回调。
+      levelWidth = 3200 + lv * 300;
 
       const maxGap = Math.floor(jumpDistance(vehicle) * 0.72);   // 留 28% 容错，点按跳也能过
       const minGap = 62;
@@ -232,6 +326,10 @@
       stars = [];
       particles = [];
       floaters = [];
+      runClean = true;             // 每次生成新关卡重置完美标记
+      runScore = 0;                // 每次生成新关卡重置评分/连击/评级
+      runCombo = 0;
+      runGrade = null;
 
       // --- 5.1 地形：起步平台 → （缺口 | 平台）循环 → 终点平台 ---
       // 硬性约束：缺口后必须接平台，否则连续缺口会累加成不可跨越的死路。
@@ -242,7 +340,7 @@
       x = START_W;
 
       while (x < levelWidth - END_W - 200) {
-        if (!lastWasGap && Math.random() < gapChance) {
+        if (!lastWasGap && rng() < gapChance) {
           x += ri(minGap, maxGap);
           lastWasGap = true;
         } else {
@@ -266,8 +364,10 @@
       // 儿童向难度：障碍密度刻意压低、最小间距拉大，保证「看得清、躲得开」。
       const avail = Math.max(600, levelWidth - START_W - END_W);
       const spacing = clamp(360 - lv * 6, 240, 360);
-      const count = clamp(Math.round(avail / spacing), 4, 13);
+      const count = clamp(Math.round(avail / spacing), 4, 16);
       const minSpacing = Math.max(230, spacing * 0.75);
+      // 意见④：难度分档——新障碍随关数逐步解锁（unlock 字段见 HAZARDS 定义）
+      const unlockedKeys = HAZARD_KEYS.filter(function (k) { return lv >= (HAZARDS[k].unlock || 0); });
       const placed = [];
       let guard = 0;
       for (let i = 0; i < count && guard < count * 30; guard++) {
@@ -283,7 +383,7 @@
         }
         if (!ok) continue;
 
-        const type = pick(HAZARD_KEYS);
+        const type = pick(unlockedKeys);
         const def = HAZARDS[type];
         const obj = { type: type, x: hx, y: seg.y, t: rand(0, 6), phase: rand(0, 6.28), baseY: seg.y };
         if (def.cycle !== undefined) obj.cycle = def.cycle;   // 火焰/闸门周期：漏复制会变成 undefined → NaN → 永远关/永远不喷
@@ -292,7 +392,7 @@
 
         if (type === 'gear' || type === 'saw') {
           obj.y = seg.y - def.r * 2 + 8;                 // 贴地
-          obj.spin = (type === 'gear' ? 1.6 : 5.2) * (Math.random() < 0.5 ? -1 : 1);
+          obj.spin = (type === 'gear' ? 1.6 : 5.2) * (rng() < 0.5 ? -1 : 1);
         } else if (type === 'fire') {
           obj.y = seg.y - def.h;
         } else if (type === 'patrol') {
@@ -307,6 +407,16 @@
           obj.spd = 1.3 + Math.min(lv * 0.04, 0.8);
           obj.baseY = seg.y - 44 - rand(20, 70);
           obj.y = obj.baseY;
+        } else if (type === 'triGear') {
+          // 意见④：上下往复移动的三角齿轮，悬空转着咬人，看准节奏从下面冲过去
+          obj.range = rand(60, 110);
+          obj.spd = 1.1 + Math.min(lv * 0.05, 1.0);
+          obj.baseY = seg.y - 46 - rand(20, 70);
+          obj.y = obj.baseY;
+          obj.spin = 2.8 * (rng() < 0.5 ? -1 : 1);
+        } else if (type === 'blocker') {
+          // 意见④：挡路大个子，站地上不动，必须跳过它才能继续
+          obj.y = seg.y - def.h;
         } else {
           obj.y = seg.y - def.h;
         }
@@ -336,6 +446,7 @@
       goal = { x: endSeg.x + endSeg.w * 0.5 - 26, y: endSeg.y - 74, w: 52, h: 52, bob: 0, taken: false };
 
       // --- 5.5 玩家 ---
+      // 三心机制：撞到障碍/掉坑各扣 1 心，扣光才死亡（比一击死亡更宽容，利于留存）。
       const startSeg = platforms[0];
       player = {
         x: 90, y: startSeg.y - 50, w: 44, h: 50,
@@ -350,6 +461,7 @@
       screenFlash = 0;
       shake = 0;
       buildBackdrop();
+      startBgm((lv - 1) % 6);      // 意见③：每一关不同的背景音乐（跟主题走）
     }
 
     /* =========================================================================
@@ -457,7 +569,7 @@
         h.t += FIXED_DT;
         if (h.type === 'patrol') {
           h.x = h.baseX + Math.sin(h.t * h.spd) * h.range;
-        } else if (h.type === 'slider') {
+        } else if (h.type === 'slider' || h.type === 'triGear') {
           h.y = h.baseY + Math.sin(h.t * h.spd) * h.range;
         } else if (h.type === 'gate') {
           const cyc = (h.t / h.cycle + h.phase / 6.28) % 1;
@@ -497,11 +609,16 @@
         if (aabb(p.x, p.y, p.w, p.h, s.x - s.r, s.y - s.r, s.r * 2, s.r * 2)) {
           s.taken = true;
           comboCount++;
+          runCombo = Math.max(runCombo, comboCount);
           const gain = 1;
           runGifts += gain;
+          // 评分：每星 30 + 连击加成（连击越高越值钱，奖励连续无伤吃星）
+          const pts = 30 + (comboCount - 1) * 5;
+          runScore += pts;
           sfx.play('coin');
           spawnBurst(s.x, s.y, '#ffd24a', 12);
-          pushFloater(s.x, s.y - 10, '+' + gain, '#ffd24a');
+          pushFloater(s.x, s.y - 10, '+' + pts, '#ffd24a');
+          if (comboCount >= 2) pushFloater(s.x, s.y - 32, comboCount + ' 连击！', '#7afcff');
         }
       }
 
@@ -545,8 +662,10 @@
     function hurt(amount, isFall) {
       const p = player;
       if (p.invuln > 0 || p.dead) return;
+      // 三心机制：撞到/掉坑各扣 1 心，扣光才死亡。掉坑扣心后回检查点重来。
       p.lives -= amount;
       comboCount = 0;
+      runClean = false;              // 受过伤 → 本关不再算完美
       p.invuln = 78;                 // 1.3s 无敌，防止连续掉血
       shake = isFall ? 6 : 12;
       screenFlash = 0.18;
@@ -577,17 +696,20 @@
 
     function onDead() {
       state = 'dead';
+      stopBgm();
       sfx.play('fail');
       vibrate(140);
       spawnBurst(player.x + player.w / 2, player.y + player.h / 2, pet.color, 30);
       save.runs = (save.runs | 0) + 1;
       if (level > (save.best | 0)) save.best = level;
       save.gifts = (save.gifts | 0) + runGifts;
+      if ((save.runs | 0) >= 20) unlockAchievement('play20');
       persist();
     }
 
     function onCleared() {
       state = 'cleared';
+      stopBgm();
       sfx.play('clear');
       vibrate(60);
       const base = 3;
@@ -595,6 +717,39 @@
       spawnBurst(goal.x + goal.w / 2, goal.y + goal.h / 2, '#ffd24a', 34);
       if (level + 1 > (save.best | 0)) save.best = level + 1;
       save.gifts = (save.gifts | 0) + runGifts;
+      // 评分结算：通关 100 + 无伤 50，加上吃星/连击分 → 映射评级
+      runScore += 100;
+      if (runClean) runScore += 50;
+      runGrade = gradeFor(runScore);
+      if (runScore > (save.bestScore | 0)) save.bestScore = runScore;
+      // 每日挑战：记录今日最佳
+      if (dailyMode) save.dailyBest[dailyKey] = Math.max(save.dailyBest[dailyKey] || 0, runScore);
+      // 排行榜：本地 top10（分数/关卡/宠物）
+      save.scores.push({ score: runScore, level: level, pet: pet.id, date: Date.now() });
+      save.scores.sort(function (a, b) { return b.score - a.score; });
+      if (save.scores.length > 10) save.scores.length = 10;
+      // 意见②：礼物里开出装饰品（确定性解锁表：累计礼物达标即入手）。
+      for (const a of ACCESSORIES) {
+        if (save.acc.indexOf(a.id) < 0 && (save.gifts | 0) >= a.need) {
+          save.acc.push(a.id);
+          pendingUnlock = a;
+          break;                       // 一关只开一件，孩子看得清
+        }
+      }
+      // 意见②：整关没受过伤 → 房子进度 +1，攒满 3 段建成大房子（解锁小屋）。
+      if (runClean && save.house < 3) {
+        save.house++;
+        if (save.house >= 3) { toast('🏠 大房子建成啦！'); }
+        else { toast('完美通关！房子 ' + save.house + '/3'); }
+      }
+      // 成就触发
+      unlockAchievement('firstClear');
+      if (level >= 10) unlockAchievement('clear10');
+      if ((save.gifts | 0) >= 50) unlockAchievement('gift50');
+      if (runClean) unlockAchievement('noHit');
+      if (runCombo >= 5) unlockAchievement('combo5');
+      if (runGrade.g === 'S') unlockAchievement('gradeS');
+      if (save.house >= 3) unlockAchievement('house3');
       persist();
     }
 
@@ -602,13 +757,15 @@
       if (state !== 'dead' || revivesUsed >= 2) return;
       const cb = function (ok) {
         if (!ok) { toast('广告未看完，复活失败'); return; }
-        player.lives = 3;
+        player.lives = 3;              // 看广告复活：满血继续本关
         player.dead = false;
         revivesUsed++;
+        runClean = false;
         respawnAtCheckpoint();
         player.invuln = 120;
         state = 'playing';
         sfx.play('rev');
+        startBgm();
         toast('复活成功！继续闯关');
       };
       ads.showRewarded('revive', cb);
@@ -988,13 +1145,78 @@
       g.beginPath(); g.ellipse(x, y, w, h, 0, 0, 6.283); g.fill();
     };
     // 把宠物画到 (x,y) 头中心，s 缩放，flip 朝向，t 动画，run 是否奔跑
-    ART.drawPet = function (id, g, x, y, s, flip, t, run) {
+    // 意见①：孩子要求「动物大一点点、迪士尼风、头大身小」。
+    // PET_VIS_SCALE 只放大视觉（1.2×），碰撞盒 w:44 h:50 保持不变——
+    // 碰撞盒一变，跳跃距离/平台手感全要重新调，视觉与手感解耦是这里的关键取舍。
+    const PET_VIS_SCALE = 1.2;
+    ART.drawPet = function (id, g, x, y, s, flip, t, run, acc) {
       g.save();
       g.translate(x, y);
-      g.scale(flip * s, s);
+      g.scale(flip * s * PET_VIS_SCALE, s * PET_VIS_SCALE);
       const fn = ART.pets[id] || ART.pets.cat;
       fn(g, t, run);
+      if (acc) ART.drawAcc(g, acc, t);   // 意见②：帽子/眼镜/围巾（意见②的穿戴渲染）
       g.restore();
+    };
+
+    /* ---------- 装饰品（意见②）：画在宠物头中心坐标系里 ----------
+     * 头 R≈21：帽 y≈-18，眼镜沿眼睛线 y≈-5，围巾/披风在头底 y≈18。
+     * 各宠物头 R 有 ±3 差异，Q 版风格下统一偏移即可，不逐只校准。 */
+    ART.drawAcc = function (g, eq, t) {
+      if (eq.glasses === 'glasses') {
+        g.fillStyle = '#2e2622';
+        g.beginPath(); g.roundRect ? g.roundRect(-14, -9, 28, 9, 4) : g.rect(-14, -9, 28, 9); g.fill();
+        g.fillStyle = 'rgba(255,255,255,0.35)';
+        g.beginPath(); g.roundRect ? g.roundRect(-12, -8, 10, 3, 1.5) : g.rect(-12, -8, 10, 3); g.fill();
+      } else if (eq.glasses === 'starGlass') {
+        g.fillStyle = '#ffd24a';
+        ART.star(g, -8, -5, 6, '#ffd24a', '#d89a1e');
+        ART.star(g, 8, -5, 6, '#ffd24a', '#d89a1e');
+        g.strokeStyle = '#d89a1e'; g.lineWidth = 2;
+        g.beginPath(); g.moveTo(-2, -5); g.lineTo(2, -5); g.stroke();
+      }
+      if (eq.hat === 'cap') {
+        g.fillStyle = '#e5484d';
+        g.beginPath(); g.arc(0, -15, 12, Math.PI, 0); g.fill();
+        g.fillStyle = '#c0392b';
+        g.beginPath(); g.roundRect ? g.roundRect(-15, -16, 30, 4.5, 2.2) : g.rect(-15, -16, 30, 4.5); g.fill();
+        g.fillStyle = '#ffd24a';
+        g.beginPath(); g.arc(0, -26, 2.6, 0, 6.283); g.fill();
+      } else if (eq.hat === 'crown') {
+        g.fillStyle = '#ffd24a';
+        g.beginPath();
+        g.moveTo(-11, -14); g.lineTo(-11, -24); g.lineTo(-5.5, -18); g.lineTo(0, -26);
+        g.lineTo(5.5, -18); g.lineTo(11, -24); g.lineTo(11, -14);
+        g.closePath(); g.fill();
+        g.fillStyle = '#ff5e87';
+        g.beginPath(); g.arc(0, -17.5, 1.8, 0, 6.283); g.fill();
+      } else if (eq.hat === 'bowknot') {
+        g.save();
+        g.translate(8, -20);
+        g.rotate(-0.25);
+        g.fillStyle = '#ff7eb6';
+        g.beginPath(); g.ellipse(-5.5, 0, 5.5, 3.8, -0.4, 0, 6.283); g.fill();
+        g.beginPath(); g.ellipse(5.5, 0, 5.5, 3.8, 0.4, 0, 6.283); g.fill();
+        g.fillStyle = '#e0508f';
+        g.beginPath(); g.arc(0, 0, 2.6, 0, 6.283); g.fill();
+        g.restore();
+      }
+      if (eq.neck === 'scarf') {
+        g.fillStyle = '#e74c3c';
+        g.beginPath(); g.roundRect ? g.roundRect(-11, 16, 22, 7, 3.5) : g.rect(-11, 16, 22, 7); g.fill();
+        const sw = Math.sin(t * 5) * 2;
+        g.beginPath();
+        g.moveTo(9, 18); g.lineTo(17, 24 + sw); g.lineTo(15, 29 + sw); g.lineTo(7, 22);
+        g.closePath(); g.fill();
+      } else if (eq.neck === 'cape') {
+        g.fillStyle = '#9b59b6';
+        g.beginPath();
+        g.moveTo(-11, 15); g.quadraticCurveTo(-18, 26, -13, 36);
+        g.lineTo(13, 36); g.quadraticCurveTo(18, 26, 11, 15);
+        g.closePath(); g.fill();
+        g.fillStyle = 'rgba(255,255,255,0.25)';
+        g.beginPath(); g.arc(0, 24, 6, 0, 6.283); g.fill();
+      }
     };
 
     /* ---------- 5 种载具画师（translate 到车底中心 (0,0) 上表面向上） ---------- */
@@ -1119,9 +1341,24 @@
       return GROUND_BASE - (view.h - view.pad);
     }
 
+    // 带穿戴的宠物绘制（意见②）：游戏内所有宠物立绘统一走这里，
+    // 自动套上已穿戴的帽子/眼镜/围巾。room 小屋里换装立即生效。
+    function drawPetWithEq(id, g, x, y, s, flip, t, run) {
+      ART.drawPet(id, g, x, y, s, flip, t, run, save.eq);
+    }
+
     function render() {
       const w = view.w, h = view.h;
       ctx.clearRect(0, 0, w, h);
+      if (state === 'room') {
+        // 意见②：小屋场景独立渲染（不画 HUD / 虚拟按键 / 游戏世界）
+        drawRoom(w, h);
+        drawParticles();
+        drawOverlayButtons();
+        drawToast();
+        drawVignette(w, h);
+        return;
+      }
       drawSky(w, h);
       drawParallax();
       drawTerrain();
@@ -1139,6 +1376,16 @@
       drawTouchControls();
       drawOverlay();
       drawToast();
+      drawVignette(w, h);
+    }
+
+    // 暗角（2.5D 精致化）：屏幕边缘轻微压暗，聚焦画面中心，提升质感
+    function drawVignette(w, h) {
+      const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.36, w / 2, h / 2, Math.max(w, h) * 0.74);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(1, 'rgba(18,10,36,0.30)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
     }
 
     function drawSky(w, h) {
@@ -1154,8 +1401,13 @@
       if (!theme.dark) {
         // 明亮主题：太阳（右上）+ 卡通云
         const sunX = view.portrait ? w * 0.5 : w - 130, sunY = 84;
-        ctx.fillStyle = 'rgba(255,235,150,0.35)';
-        ctx.beginPath(); ctx.arc(sunX, sunY, 52, 0, 6.283); ctx.fill();
+        // 2.5D：太阳 radial 光晕（大而柔和的光斑，非生硬圆盘）
+        const halo = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 90);
+        halo.addColorStop(0, 'rgba(255,240,170,0.75)');
+        halo.addColorStop(0.4, 'rgba(255,235,150,0.35)');
+        halo.addColorStop(1, 'rgba(255,235,150,0)');
+        ctx.fillStyle = halo;
+        ctx.fillRect(sunX - 92, sunY - 92, 184, 184);
         ctx.fillStyle = '#ffe58a';
         ctx.beginPath(); ctx.arc(sunX, sunY, 36, 0, 6.283); ctx.fill();
         ctx.fillStyle = '#fff3c4';
@@ -1459,6 +1711,64 @@
             ctx.beginPath(); ctx.arc(px + 16, py - 8 + bobY, 2.2, 0, 6.283); ctx.fill();
             break;
           }
+          case 'triGear': {
+            // 意见④：旋转的三角形齿轮（白描边 + 三角齿 + 中心铆钉）
+            ctx.translate(sx + h.r, sy + h.r);
+            ctx.rotate(h.t * h.spin);
+            ctx.fillStyle = '#ffffff';
+            for (let i = 0; i < 3; i++) {
+              ctx.rotate(2.0944);
+              ctx.beginPath();
+              ctx.moveTo(0, -h.r - 9);
+              ctx.lineTo(9, -h.r + 2);
+              ctx.lineTo(-9, -h.r + 2);
+              ctx.closePath(); ctx.fill();
+            }
+            ctx.fillStyle = '#5e60ce';
+            ctx.beginPath(); ctx.arc(0, 0, h.r, 0, 6.283); ctx.fill();
+            ctx.fillStyle = '#7f83f7';
+            ctx.beginPath();
+            ctx.moveTo(0, -h.r * 0.78); ctx.lineTo(h.r * 0.68, h.r * 0.4); ctx.lineTo(-h.r * 0.68, h.r * 0.4);
+            ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#fff8e1';
+            ctx.beginPath(); ctx.arc(0, 0, h.r * 0.24, 0, 6.283); ctx.fill();
+            break;
+          }
+          case 'blocker': {
+            // 意见④：挡路大个子小怪兽（绿色胖墩 + 白描边 + 呆萌大眼 + 小短腿）
+            const bx = sx + h.w / 2, by = sy + h.h;
+            const breathe = 1 + Math.sin(h.t * 4) * 0.03;
+            // 影子
+            ctx.fillStyle = 'rgba(0,0,0,0.15)';
+            ctx.beginPath(); ctx.ellipse(bx, by + 3, h.w * 0.52, 6, 0, 0, 6.283); ctx.fill();
+            // 小短腿
+            ctx.fillStyle = '#3f9142';
+            ctx.beginPath(); ctx.ellipse(bx - 14, by - 4, 8, 5, 0, 0, 6.283); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(bx + 14, by - 4, 8, 5, 0, 0, 6.283); ctx.fill();
+            // 白描边大身体
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath(); ctx.arc(bx, by - h.h * 0.52, h.w / 2 + 3, 0, 6.283); ctx.fill();
+            ctx.fillStyle = '#57b85a';
+            ctx.beginPath();
+            ctx.ellipse(bx, by - h.h * 0.52, h.w / 2, (h.h / 2) * breathe, 0, 0, 6.283);
+            ctx.fill();
+            // 肚皮
+            ctx.fillStyle = '#cdeecb';
+            ctx.beginPath(); ctx.ellipse(bx, by - h.h * 0.36, h.w * 0.30, h.h * 0.22, 0, 0, 6.283); ctx.fill();
+            // 眯眯眼 → 呆萌大眼（blink 复用 ART.eye）
+            ART.eye(ctx, bx - 10, by - h.h * 0.62, 6, h.t);
+            ART.eye(ctx, bx + 10, by - h.h * 0.62, 6, h.t);
+            // 撅嘴
+            ctx.strokeStyle = '#2f6b32'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+            ctx.beginPath(); ctx.arc(bx, by - h.h * 0.44, 4, 0.35, 2.79); ctx.stroke();
+            // 头顶呆毛
+            ctx.strokeStyle = '#2f6b32'; ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(bx, by - h.h * 0.98);
+            ctx.quadraticCurveTo(bx + 4, by - h.h * 1.12, bx + 10, by - h.h * 1.06);
+            ctx.stroke();
+            break;
+          }
           case 'gate': {
             if (h.open) {
               ctx.strokeStyle = 'rgba(46,204,113,0.85)'; ctx.lineWidth = 4;
@@ -1524,9 +1834,12 @@
       const bounce = p.onGround ? Math.abs(Math.sin(p.animT * 9)) * 3.2 : 0;
       const groundY = sy + p.h + 2;
 
-      // 影子
-      ctx.fillStyle = 'rgba(0,0,0,0.16)';
-      ctx.beginPath(); ctx.ellipse(cx, groundY + 3, 25, 5.5, 0, 0, 6.283); ctx.fill();
+      // 影子（2.5D：双层柔和投影，空中缩小变淡 → 立体落地感）
+      const airF = p.onGround ? 1 : 0.72;
+      ctx.fillStyle = 'rgba(0,0,0,' + (0.20 * airF).toFixed(3) + ')';
+      ctx.beginPath(); ctx.ellipse(cx, groundY + 4, 27 * airF, 6 * airF, 0, 0, 6.283); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,' + (0.10 * airF).toFixed(3) + ')';
+      ctx.beginPath(); ctx.ellipse(cx, groundY + 3, 20 * airF, 4 * airF, 0, 0, 6.283); ctx.fill();
 
       // 跑动尾尘
       if (run && Math.random() < 0.45) {
@@ -1536,9 +1849,9 @@
       // 载具（先画 → 在角色下层）
       ART.drawVehicle(vehicle.id, ctx, cx, groundY, flip, vehicle.accent, p.animT);
 
-      // 宠物（骑在载具上，头中心 ≈ 车座上方）
+      // 宠物（骑在载具上，头中心 ≈ 车座上方；意见① 放大后锚点 -54 → -58）
       const tAnim = p.animT + (run ? p.x * 0.018 : 0);
-      ART.drawPet(pet.id, ctx, cx, groundY - 54 + bounce * 0.85, 1, flip, tAnim, run);
+      drawPetWithEq(pet.id, ctx, cx, groundY - 58 + bounce * 0.85, 1, flip, tAnim, run);
 
       ctx.restore();
     }
@@ -1630,15 +1943,43 @@
       ctx.restore();
     }
 
+    // 小喇叭图标（意见③ 静音开关）：x,y 中心，s 大小
+    function drawSpeakerIcon(x, y, s, mutedOn) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(s / 22, s / 22);
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.moveTo(-8, -3); ctx.lineTo(-3, -3); ctx.lineTo(3, -8);
+      ctx.lineTo(3, 8); ctx.lineTo(-3, 3); ctx.lineTo(-8, 3);
+      ctx.closePath(); ctx.fill();
+      if (!mutedOn) {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(4, 0, 6, -0.9, 0.9); ctx.stroke();
+        ctx.beginPath(); ctx.arc(4, 0, 9.5, -0.8, 0.8); ctx.stroke();
+      } else {
+        ctx.strokeStyle = '#ff8a95'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(5, -5); ctx.lineTo(12, 5);
+        ctx.moveTo(12, -5); ctx.lineTo(5, 5);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     function drawHUD() {
-      if (state === 'cover') return;
+      if (state === 'cover' || state === 'room') return;
       const w = view.w;
-      // 左上：关卡 + 生命
-      panel(12, 12, 184, 46, 23);
+      // 左上：关卡 + 三颗心 + 喇叭（三心机制：撞到障碍/掉坑各扣 1 心）
+      panel(12, 12, 214, 46, 23);
       ctx.font = 'bold 17px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillText('第 ' + level + ' 关', 26, 35);
-      heartRow(98, 35, player ? player.lives : 0, 21);
+      heartRow(92, 35, player ? player.lives : 3, 19);
+      const mutedOn = sfx.isMuted && sfx.isMuted();
+      ctx.globalAlpha = mutedOn ? 0.55 : 1;
+      drawSpeakerIcon(198, 35, 20, mutedOn);
+      ctx.globalAlpha = 1;
 
       // 右上：礼物（手绘礼物图标 + 数字）—— 给暂停键留出右侧空间
       panel(w - 198, 12, 128, 46, 23);
@@ -1648,7 +1989,7 @@
       ctx.fillText(runGifts, w - 154, 36);
 
       // 顶部进度条（胶囊 + 光泽）
-      const bx = 210, bw = Math.max(120, w - 470), by = 35;
+      const bx = 232, bw = Math.max(120, w - 496), by = 35;
       ctx.fillStyle = 'rgba(255,255,255,0.22)';
       roundRect(bx - 2, by - 9, bw + 4, 18, 9); ctx.fill();
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
@@ -1679,6 +2020,8 @@
         touchButtons.push({ id: 'left', kind: 'round', x: 34 + R, y: by, r: R });
         touchButtons.push({ id: 'right', kind: 'round', x: 34 + R * 3 + 26, y: by, r: R });
         touchButtons.push({ id: 'jump', kind: 'round', x: view.w - 34 - R * 1.15, y: by, r: R * 1.15, accent: true });
+        // 意见③：常驻小喇叭（画在左上 HUD 面板里，热区 36px 方便小手指点按）
+        touchButtons.push({ id: 'sound', kind: 'round', x: 198, y: 35, r: 17, hidden: true });
       }
       // 暂停：常驻右上角（避开礼物面板）
       touchButtons.push({ id: 'pause', kind: 'round', x: view.w - 34, y: 36, r: 22 });
@@ -1689,6 +2032,7 @@
     function drawTouchControls() {
       layoutButtons();
       for (const b of touchButtons) {
+        if (b.hidden) continue;
         const active = (b.id === 'jump' && touchState.jump) ||
                        (b.id === 'left' && touchState.left) ||
                        (b.id === 'right' && touchState.right);
@@ -1762,21 +2106,41 @@
         buildCoverButtons(w, h);
       } else if (state === 'paused') {
         btn(w / 2 - 110, h * 0.55, 220, 54, '继续游戏', 'resume');
-        btn(w / 2 - 110, h * 0.55 + 68, 220, 48, '重新开始本关', 'restart', true);
-        btn(w / 2 - 110, h * 0.55 + 128, 220, 48, '返回首页', 'home', true);
+        btn(w / 2 - 110, h * 0.55 + 68, 220, 48, (sfx.isMuted && sfx.isMuted()) ? '🔇 声音：关' : '🔊 声音：开', 'music', true);
+        btn(w / 2 - 110, h * 0.55 + 128, 220, 48, '重新开始本关', 'restart', true);
+        btn(w / 2 - 110, h * 0.55 + 188, 220, 48, '返回首页', 'home', true);
       } else if (state === 'dead') {
+        // 三心时代：看广告满血复活（最多 2 次）+ 再来一次本关 + 回首页
         const canRevive = revivesUsed < 2;
         if (canRevive) btn(w / 2 - 130, h * 0.56, 260, 54, '🎬 看广告复活', 'revive');
         btn(w / 2 - 130, h * 0.56 + (canRevive ? 68 : 0), 260, 50, '再来一次', 'retry', canRevive);
         btn(w / 2 - 130, h * 0.56 + (canRevive ? 128 : 66), 260, 46, '返回首页', 'home', true);
       } else if (state === 'cleared') {
         btn(w / 2 - 130, h * 0.56, 260, 54, '🎬 奖励翻倍', 'double');
-        btn(w / 2 - 130, h * 0.56 + 68, 260, 50, '下一关', 'next');
-        btn(w / 2 - 130, h * 0.56 + 128, 260, 46, '返回首页', 'home', true);
+        if (save.house >= 3) btn(w / 2 - 130, h * 0.56 + 68, 260, 50, '🏠 回小屋休息', 'room');
+        btn(w / 2 - 130, h * 0.56 + (save.house >= 3 ? 128 : 68), 260, 50, '下一关', 'next');
+        btn(w / 2 - 130, h * 0.56 + (save.house >= 3 ? 188 : 128), 260, 46, '返回首页', 'home', true);
+      } else if (state === 'room') {
+        // 意见②：小屋。家具热区不可见（点什么宠物就干什么）+ 底部换装 + 出发。
+        btn(w * 0.06, h * 0.26, w * 0.36, h * 0.36, '', 'tv', false, true);
+        btn(w * 0.44, h * 0.52, w * 0.22, h * 0.26, '', 'eat', false, true);
+        btn(w * 0.70, h * 0.36, w * 0.26, h * 0.30, '', 'sleep', false, true);
+        btn(14, h - 76, 130, 48, '🎩 ' + (accName(save.eq.hat) || '不戴'), 'wearHat', true);
+        btn(152, h - 76, 130, 48, '🕶 ' + (accName(save.eq.glasses) || '不戴'), 'wearGlass', true);
+        btn(290, h - 76, 130, 48, '🧣 ' + (accName(save.eq.neck) || '不戴'), 'wearNeck', true);
+        btn(w - 226, h - 76, 212, 52, '继续闯关', 'keepgoing');
+        btn(w - 128, 16, 114, 44, '回首页', 'home', true);
+      } else if (state === 'scores' || state === 'achievements') {
+        // 留存系统子界面：一个返回按钮
+        btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
+      } else if (state === 'daily') {
+        // 每日挑战：开始挑战 + 返回
+        btn(w / 2 - 130, h * 0.52, 260, 54, '开始挑战', 'dailyStart');
+        btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
       }
     }
-    function btn(x, y, w, h, label, id, secondary) {
-      overlayButtons.push({ x: x, y: y, w: w, h: h, label: label, id: id, secondary: !!secondary });
+    function btn(x, y, w, h, label, id, secondary, hidden) {
+      overlayButtons.push({ x: x, y: y, w: w, h: h, label: label, id: id, secondary: !!secondary, hidden: !!hidden });
     }
 
     /* 封面按钮：宠物九宫格热区。命中检测发生在两次渲染之间，必须在这里
@@ -1799,10 +2163,25 @@
           w: grid.gs, h: grid.gs, id: 'pet:' + PETS[i].id, hidden: true,
         });
       }
+      // 意见②：大房子建成后，封面直达小屋
+      if (save.house >= 3) {
+        overlayButtons.push({ x: 16, y: h - 72, w: 122, h: 52, label: '🏠 小屋', id: 'room' });
+      }
+      // 留存系统入口（右下角竖排：排行榜 / 成就 / 每日挑战）
+      const entrys = [
+        { id: 'scores', label: '🏆 排行榜' },
+        { id: 'achievements', label: '🎖 成就' },
+        { id: 'daily', label: '📅 每日挑战' },
+      ];
+      const ex = w - 124, ey = h - 72;
+      for (let i = 0; i < entrys.length; i++) {
+        overlayButtons.push({ x: ex, y: ey - i * 54, w: 112, h: 44, label: entrys[i].label, id: entrys[i].id, secondary: true });
+      }
     }
 
     function drawOverlay() {
-      if (state === 'playing') return;
+      // room 小屋是全屏独立场景（由 render() 的 room 分支处理），不走遮罩
+      if (state === 'playing' || state === 'room') return;
       const w = view.w, h = view.h;
       ctx.save();
       // 精致暗紫遮罩（比纯黑更通透）
@@ -1817,6 +2196,9 @@
       else if (state === 'paused') drawPause(w, h);
       else if (state === 'dead') drawDead(w, h);
       else if (state === 'cleared') drawCleared(w, h);
+      else if (state === 'scores') drawScores(w, h);
+      else if (state === 'achievements') drawAchievements(w, h);
+      else if (state === 'daily') drawDaily(w, h);
 
       drawOverlayButtons();
       ctx.restore();
@@ -1904,7 +2286,7 @@
         // 宠物立绘
         ctx.globalAlpha = unlocked ? 1 : 0.3;
         const faceCx = bx + gs / 2, faceCy = by + gs * 0.42;
-        ART.drawPet(p.id, ctx, faceCx, faceCy, 0.92, 1, timeAcc + i * 2, true);
+        drawPetWithEq(p.id, ctx, faceCx, faceCy, 0.92, 1, timeAcc + i * 2, true);
         ctx.globalAlpha = 1;
         // 名字标签
         ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
@@ -1920,16 +2302,18 @@
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       drawGiftIconSmall(ctx, cx - 110, infoY, 16);
       const leftText = '累计 ' + (save.gifts | 0);
-      const halfLW = ctx.measureText(leftText).width / 2;
       ctx.textAlign = 'left';
       ctx.fillStyle = '#ffd24a';
       ctx.fillText(leftText, cx - 86, infoY);
       ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.fillText('·', cx, infoY);
+      ctx.fillText('·', cx - 20, infoY);
       ctx.fillStyle = 'rgba(255,255,255,0.95)';
       ctx.font = '900 16px "PingFang SC","Microsoft YaHei",sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText('最高纪录：第 ' + (save.best | 0) + ' 关', cx + 12, infoY);
+      ctx.fillText('最高纪录：第 ' + (save.best | 0) + ' 关', cx - 2, infoY);
+      // 意见②：房子进度（3 段建成大房子）
+      ctx.fillStyle = save.house >= 3 ? '#9af29a' : 'rgba(255,255,255,0.8)';
+      ctx.font = '900 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText(save.house >= 3 ? '🏠 大房子已建成' : '🏠 房子 ' + save.house + '/3', cx + 172, infoY);
     }
     function drawGiftIconSmall(ctx2, x, y, s) {
       ctx2.save();
@@ -1944,6 +2328,151 @@
       ctx2.fillRect(-2.6, -8, 5.2, 17);
       ctx2.beginPath(); ctx2.arc(0, -8, 4, 0, 6.283); ctx2.fill();
       ctx2.restore();
+    }
+
+    /* ---------- 意见②：小屋场景 ----------
+     * 完美通关攒满 3 段房子后开放。点电视/饭碗/小床，宠物就去做那件事；
+     * 底部按钮换装；「继续闯关」带着新装饰出发。 */
+    function drawRoom(w, h) {
+      const floorY = h * 0.60;
+      // 墙（暖白）+ 地板（奶油木色）
+      const wall = ctx.createLinearGradient(0, 0, 0, floorY);
+      wall.addColorStop(0, '#fdf6ec'); wall.addColorStop(1, '#f6e9d8');
+      ctx.fillStyle = wall; ctx.fillRect(0, 0, w, floorY);
+      const fl = ctx.createLinearGradient(0, floorY, 0, h);
+      fl.addColorStop(0, '#e8c99b'); fl.addColorStop(1, '#d9b382');
+      ctx.fillStyle = fl; ctx.fillRect(0, floorY, w, h - floorY);
+      ctx.strokeStyle = 'rgba(160,120,70,0.22)'; ctx.lineWidth = 2;
+      for (let i = 0; i < 7; i++) {
+        const ly = floorY + (i + 0.5) * (h - floorY) / 7;
+        ctx.beginPath(); ctx.moveTo(0, ly); ctx.lineTo(w, ly); ctx.stroke();
+      }
+      ctx.fillStyle = '#f9efdd'; ctx.fillRect(0, floorY - 8, w, 8);
+
+      // 圆窗 + 慢慢飘的云
+      const wx = w * 0.5, wy = h * 0.20, wr = Math.min(w, h) * 0.10;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(wx, wy, wr + 7, 0, 6.283); ctx.fill();
+      ctx.fillStyle = '#aee1f9';
+      ctx.beginPath(); ctx.arc(wx, wy, wr, 0, 6.283); ctx.fill();
+      const cl = (timeAcc * 14) % (wr * 2.4) - wr * 1.2;
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.beginPath(); ctx.arc(wx - wr * 0.35 + cl, wy + wr * 0.15, wr * 0.24, 0, 6.283); ctx.fill();
+      ctx.beginPath(); ctx.arc(wx - wr * 0.35 + cl + wr * 0.22, wy + wr * 0.02, wr * 0.18, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(wx, wy - wr); ctx.lineTo(wx, wy + wr);
+      ctx.moveTo(wx - wr, wy); ctx.lineTo(wx + wr, wy);
+      ctx.stroke();
+
+      // 墙饰：完美通关奖状 + 宠物涂鸦（竖屏中段不空）
+      const fw = Math.min(w * 0.13, 86);
+      ctx.fillStyle = '#fff';
+      roundRect(wx - wr - fw - 26, wy - fw * 0.55, fw, fw * 1.1, 6); ctx.fill();
+      ctx.strokeStyle = '#e0c9a4'; ctx.lineWidth = 2;
+      roundRect(wx - wr - fw - 26, wy - fw * 0.55, fw, fw * 1.1, 6); ctx.stroke();
+      ctx.fillStyle = '#ffd24a';
+      ART.star(ctx, wx - wr - 26 - fw / 2, wy - fw * 0.1, fw * 0.22, '#ffd24a');
+      ctx.fillStyle = '#c9b489';
+      ctx.font = 'bold ' + Math.max(9, fw * 0.14) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('完美奖状', wx - wr - 26 - fw / 2, wy + fw * 0.32);
+      // 涂鸦：小房子简笔画（房子建到第几段画几笔）
+      const hx1 = wx + wr + 26, hy1 = wy - fw * 0.55;
+      ctx.fillStyle = '#fff';
+      roundRect(hx1, hy1, fw, fw * 1.1, 6); ctx.fill();
+      ctx.strokeStyle = '#e0c9a4';
+      roundRect(hx1, hy1, fw, fw * 1.1, 6); ctx.stroke();
+      ctx.strokeStyle = '#e056a0'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+      const dh = fw * 0.5, dcx = hx1 + fw / 2, dcy = hy1 + fw * 0.62;
+      ctx.strokeRect(dcx - dh / 2, dcy - dh / 2, dh, dh * 0.8);
+      ctx.beginPath();
+      ctx.moveTo(dcx - dh * 0.62, dcy - dh / 2); ctx.lineTo(dcx, dcy - dh); ctx.lineTo(dcx + dh * 0.62, dcy - dh / 2);
+      ctx.stroke();
+      for (let i = 0; i < save.house; i++) {
+        ctx.fillStyle = '#43c463';
+        ctx.beginPath(); ctx.arc(hx1 + 12 + i * 11, hy1 + fw - 10, 3.4, 0, 6.283); ctx.fill();
+      }
+
+      // —— 电视 + 柜子（左）：屏幕滚彩虹条 ——
+      const tvX = w * 0.16, tvW = Math.min(150, w * 0.20), tvY = floorY - tvW * 0.72 - 30;
+      ctx.fillStyle = '#8a6b4f';
+      roundRect(tvX - tvW * 0.62, floorY - 46, tvW * 1.24, 46, 8); ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      roundRect(tvX - tvW / 2 - 5, tvY - 5, tvW + 10, tvW * 0.62 + 10, 10); ctx.fill();
+      ctx.save();
+      roundRect(tvX - tvW / 2, tvY, tvW, tvW * 0.62, 6);
+      ctx.fillStyle = '#2b2b33'; ctx.fill(); ctx.clip();
+      const cols = ['#ff7eb6', '#ffd24a', '#7afcff', '#9af29a'];
+      for (let i = 0; i < 8; i++) {
+        ctx.fillStyle = cols[i % 4];
+        ctx.fillRect(tvX - tvW / 2 + ((i * 46 + timeAcc * 70) % (tvW + 46)) - 23, tvY, 18, tvW * 0.62);
+      }
+      ctx.restore();
+
+      // —— 沙发（电视右侧） ——
+      const sfX = w * 0.36, sfY = floorY;
+      ctx.fillStyle = '#ffb9a3';
+      roundRect(sfX - 70, sfY - 78, 140, 56, 16); ctx.fill();
+      roundRect(sfX - 86, sfY - 52, 172, 48, 14); ctx.fill();
+      ctx.fillStyle = '#ff9d84';
+      roundRect(sfX - 68, sfY - 42, 136, 24, 10); ctx.fill();
+
+      // —— 饭碗（中） ——
+      const fwX = w * 0.55, fwY = floorY + 30;
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath(); ctx.ellipse(fwX, fwY + 6, 46, 12, 0, 0, 6.283); ctx.fill();
+      ctx.fillStyle = '#e056a0';
+      ctx.beginPath(); ctx.ellipse(fwX, fwY, 27, 13, 0, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = '#c94488';
+      ctx.beginPath(); ctx.ellipse(fwX, fwY, 27, 7, 0, 0, Math.PI); ctx.fill();
+      const bites = Math.floor((timeAcc % 3) * 3);
+      ctx.fillStyle = '#fff4d6';
+      for (let i = 0; i < 3 - bites; i++) {
+        ctx.beginPath(); ctx.ellipse(fwX - 10 + i * 10, fwY - 5 - (i % 2) * 3, 5, 3.2, 0.4, 0, 6.283); ctx.fill();
+      }
+
+      // —— 小床（右） ——
+      const bdX = w * 0.84, bdY = floorY + 8;
+      ctx.fillStyle = '#ffffff';
+      roundRect(bdX - 92, bdY - 26, 184, 42, 12); ctx.fill();
+      ctx.fillStyle = '#a2d2ff';
+      roundRect(bdX - 84, bdY - 36, 60, 26, 10); ctx.fill();
+      ctx.fillStyle = '#ffdfd3';
+      roundRect(bdX - 20, bdY - 32, 106, 32, 10); ctx.fill();
+      ctx.strokeStyle = '#e8b5a5'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(bdX - 20, bdY - 22); ctx.quadraticCurveTo(bdX + 30, bdY - 12, bdX + 84, bdY - 24); ctx.stroke();
+
+      // —— 宠物（按动作就位，穿戴装饰随时可见） ——
+      const chew = petAction === 'eat' ? Math.sin(timeAcc * 10) * 2.5 : 0;
+      let px = w * 0.5, py = floorY - 52, ps = 1.15;
+      if (petAction === 'tv') { px = sfX + 4; py = sfY - 60; ps = 0.92; }
+      else if (petAction === 'eat') { px = fwX; py = floorY - 44 + chew * 2; ps = 1.0; }
+      else if (petAction === 'sleep') { px = bdX - 6; py = bdY - 42; ps = 0.88; }
+      drawPetWithEq(pet.id, ctx, px, py, ps, 1, timeAcc, false);
+
+      // Zzz（睡觉）
+      if (petAction === 'sleep') {
+        for (let i = 0; i < 3; i++) {
+          const zz = (timeAcc * 0.9 + i * 0.7) % 2;
+          ctx.globalAlpha = clamp(1.4 - zz, 0, 1);
+          ctx.fillStyle = '#7a9bd4';
+          ctx.font = 'bold ' + (13 + i * 4) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+          ctx.fillText('Z', px + 22 + i * 12, py - 18 - zz * 40);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // 默认提示
+      if (!petAction) {
+        ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(120,90,60,0.75)';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('点点电视、饭碗和小床，宠物就会去做那件事～', w / 2, floorY + 40);
+      }
+      // 标题
+      gradientTitle('我的小屋', w / 2, h * 0.075, view.portrait ? 30 : 34);
     }
 
     function drawPause(w, h) {
@@ -1964,7 +2493,7 @@
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('坚持到第 ' + level + ' 关', w / 2, h * 0.30 + 34);
       // 宠物小头像
-      ART.drawPet(pet.id, ctx, w / 2, h * 0.30 + 64, 0.62, 1, timeAcc, false);
+      drawPetWithEq(pet.id, ctx, w / 2, h * 0.30 + 64, 0.62, 1, timeAcc, false);
       ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.62)';
       drawGiftIconSmall(ctx, w / 2 - 64, h * 0.30 + 82, 13);
@@ -1979,24 +2508,148 @@
     }
 
     function drawCleared(w, h) {
-      gradientTitle('关卡通过！', w / 2, h * 0.28, 38);
+      const topY = h * 0.24;
+      gradientTitle('关卡通过！', w / 2, topY, 36);
+      const cx = w / 2;
+      // 评分：大字评级 + 分数（留存系统：冲 S 评级）
+      const gr = runGrade || gradeFor(runScore);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '900 44px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = gr.color; ctx.lineWidth = 6; ctx.lineJoin = 'round';
+      ctx.strokeText(gr.g, cx - 46, topY + 46);
+      ctx.fillStyle = gr.color;
+      ctx.fillText(gr.g, cx - 46, topY + 46);
+      ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.textAlign = 'left';
+      ctx.fillText('得分 ' + runScore, cx - 20, topY + 40);
+      ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = gr.color;
+      ctx.fillText(gr.label + (runScore >= (save.bestScore | 0) ? ' · 新纪录！' : ''), cx - 20, topY + 60);
+      // 关卡信息
       ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.86)';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('第 ' + level + ' 关 · ' + theme.name, w / 2, h * 0.28 + 32);
-      // 宠物 + 载具小展示
-      const cx = w / 2;
-      ART.drawPet(pet.id, ctx, cx - 46, h * 0.28 + 70, 0.8, 1, timeAcc, false);
-      ART.drawVehicle(vehicle.id, ctx, cx + 14, h * 0.28 + 88, 1, vehicle.accent, timeAcc);
+      ctx.textAlign = 'center';
+      ctx.fillText('第 ' + level + ' 关 · ' + theme.name, cx, topY + 86);
+      // 宠物 + 载具小展示（穿戴已解锁装饰）
+      drawPetWithEq(pet.id, ctx, cx - 46, topY + 118, 0.8, 1, timeAcc, false);
+      ART.drawVehicle(vehicle.id, ctx, cx + 14, topY + 132, 1, vehicle.accent, timeAcc);
       ctx.font = 'bold 19px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = '#ffd24a';
-      drawGiftIconSmall(ctx, cx - 58, h * 0.28 + 106, 14);
+      drawGiftIconSmall(ctx, cx - 58, topY + 150, 14);
       ctx.textAlign = 'left';
-      ctx.fillText('本关礼物 ' + runGifts, cx - 38, h * 0.28 + 106);
-      ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('本关礼物 ' + runGifts, cx - 38, topY + 150);
+      // 意见②：本关开出的装饰品 / 房子进度
+      ctx.font = '900 15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('下一关：' + THEMES[level % THEMES.length].name + ' · ' + VEHICLES[level % VEHICLES.length].name, w / 2, h * 0.28 + 132);
+      if (pendingUnlock) {
+        ctx.fillStyle = '#7afcff';
+        ctx.fillText('🎁 开出了新装饰：' + pendingUnlock.name + '！', w / 2, topY + 174);
+      } else if (runClean && save.house >= 3) {
+        ctx.fillStyle = '#9af29a';
+        ctx.fillText('🏠 大房子建成啦！去小屋休息一下吧', w / 2, topY + 174);
+      } else if (runClean) {
+        ctx.fillStyle = '#9af29a';
+        ctx.fillText('完美通关！房子进度 ' + save.house + '/3', w / 2, topY + 174);
+      }
+    }
+
+    /* ---------- 排行榜（留存系统） ---------- */
+    function drawScores(w, h) {
+      gradientTitle('🏆 排行榜', w / 2, h * 0.13, 34);
+      const list = save.scores || [];
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (!list.length) {
+        ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.fillText('还没有成绩，快去闯一关吧！', w / 2, h * 0.3);
+        return;
+      }
+      const panelW = Math.min(w - 48, 560);
+      const px = (w - panelW) / 2, py = h * 0.24, rowH = 46;
+      panel(px, py, panelW, Math.min(list.length, 10) * rowH + 16, 18);
+      for (let i = 0; i < list.length && i < 10; i++) {
+        const it = list[i];
+        const petE = (PETS.find(function (p) { return p.id === it.pet; }) || {}).emoji || '🐱';
+        const y = py + 8 + i * rowH + rowH / 2;
+        // 名次徽章
+        const medal = i === 0 ? '#ffd24a' : i === 1 ? '#d7dde3' : i === 2 ? '#e0a96d' : 'rgba(255,255,255,0.18)';
+        ctx.fillStyle = medal;
+        ctx.beginPath(); ctx.arc(px + 34, y, 15, 0, 6.283); ctx.fill();
+        ctx.fillStyle = i < 3 ? '#4a3a2a' : '#fff';
+        ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillText(String(i + 1), px + 34, y);
+        // 宠物 + 分数 + 关卡
+        ctx.fillStyle = '#fff';
+        ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(petE + ' 第 ' + it.level + ' 关', px + 60, y);
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 17px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#ffd24a';
+        ctx.fillText(it.score + ' 分', px + panelW - 18, y);
+        ctx.textAlign = 'center';
+      }
+    }
+
+    /* ---------- 成就（留存系统） ---------- */
+    function drawAchievements(w, h) {
+      gradientTitle('🎖 成就', w / 2, h * 0.13, 34);
+      const got = Object.keys(save.achievements || {}).length;
+      ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('已解锁 ' + got + ' / ' + ACHIEVEMENTS.length, w / 2, h * 0.24);
+      const cols = 2;
+      const cw = Math.min(w - 48, 560) / cols - 8;
+      const ch = 74;
+      for (let i = 0; i < ACHIEVEMENTS.length; i++) {
+        const a = ACHIEVEMENTS[i];
+        const c = i % cols, r = Math.floor(i / cols);
+        const bx = (w - Math.min(w - 48, 560)) / 2 + c * (cw + 8);
+        const by = h * 0.30 + r * (ch + 10);
+        const unlocked = !!save.achievements[a.id];
+        ctx.save();
+        ctx.fillStyle = unlocked ? 'rgba(46,40,70,0.7)' : 'rgba(30,26,46,0.45)';
+        roundRect(bx, by, cw, ch, 14); ctx.fill();
+        ctx.strokeStyle = unlocked ? 'rgba(255,210,74,0.7)' : 'rgba(255,255,255,0.16)';
+        ctx.lineWidth = unlocked ? 2 : 1.2;
+        roundRect(bx, by, cw, ch, 14); ctx.stroke();
+        if (!unlocked) ctx.globalAlpha = 0.5;
+        ctx.font = '26px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(a.icon, bx + 24, by + ch / 2);
+        ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
+        ctx.fillText(a.name, bx + 50, by + 24);
+        ctx.font = '11px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.62)';
+        ctx.fillText(a.desc, bx + 50, by + 46);
+        ctx.restore();
+      }
+    }
+
+    /* ---------- 每日挑战（留存系统） ---------- */
+    function drawDaily(w, h) {
+      gradientTitle('📅 每日挑战', w / 2, h * 0.13, 34);
+      const key = todayKey();
+      const best = save.dailyBest[key] || 0;
+      const dateStr = key.slice(0, 4) + '-' + key.slice(4, 6) + '-' + key.slice(6, 8);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold 18px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(dateStr, w / 2, h * 0.24);
+      ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = best ? '#ffd24a' : 'rgba(255,255,255,0.6)';
+      ctx.fillText(best ? '今日最佳：' + best + ' 分' : '今天还没挑战，来破个纪录吧', w / 2, h * 0.31);
+      // 玩法说明
+      ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('每天一关（按日期生成，全球同关）', w / 2, h * 0.38);
+      ctx.fillText('冲高分，比谁更厉害', w / 2, h * 0.44);
+      // 宠物预告小图
+      drawPetWithEq(pet.id, ctx, w / 2, h * 0.30 + 120, 1.1, 1, timeAcc, false);
     }
 
     function drawOverlayButtons() {
@@ -2080,7 +2733,7 @@
     }
 
     /* 按下即触发的覆盖层按钮（覆盖层状态下点击响应） */
-    const TAP_ACTIONS = { pause: 1, resume: 1, restart: 1, retry: 1, home: 1, revive: 1, double: 1, next: 1 };
+    const TAP_ACTIONS = { pause: 1, resume: 1, restart: 1, retry: 1, home: 1, revive: 1, double: 1, next: 1, music: 1, sound: 1, room: 1, keepgoing: 1, tv: 1, eat: 1, sleep: 1, wearHat: 1, wearGlass: 1, wearNeck: 1, scores: 1, achievements: 1, daily: 1, dailyStart: 1, back: 1 };
 
     function onPointerDown(x, y, id) {
       const b = hitButtons(x, y);
@@ -2152,18 +2805,71 @@
       }
       switch (id) {
         case 'pause':
-          if (state === 'playing') { state = 'paused'; sfx.play('click'); }
+          if (state === 'playing') { state = 'paused'; stopBgm(); sfx.play('click'); }
           break;
-        case 'resume': state = 'playing'; break;
+        case 'resume': state = 'playing'; startBgm(); break;
         case 'restart': generateLevel(level); state = 'playing'; break;
         case 'retry': generateLevel(level); revivesUsed = 0; runGifts = 0; state = 'playing'; break;
-        case 'home': state = 'cover'; runGifts = 0; revivesUsed = 0; break;
+        case 'home':
+          state = 'cover'; runGifts = 0; revivesUsed = 0;
+          petAction = ''; pendingUnlock = null; stopBgm();
+          dailyMode = false; rng = Math.random;
+          break;
+        case 'scores': state = 'scores'; sfx.play('click'); break;
+        case 'achievements': state = 'achievements'; sfx.play('click'); break;
+        case 'daily': state = 'daily'; sfx.play('click'); break;
+        case 'dailyStart': enterDaily(); break;
+        case 'back': state = 'cover'; sfx.play('click'); dailyMode = false; rng = Math.random; break;
         case 'revive': reviveByAd(); break;
         case 'double': doubleRewardByAd(); break;
-        case 'next': level++; runGifts = 0; revivesUsed = refreshRevives(); generateLevel(level); state = 'playing'; break;
+        case 'next': level++; runGifts = 0; revivesUsed = 0; refreshRevives(); pendingUnlock = null; generateLevel(level); state = 'playing'; break;
+        case 'room':
+          // 意见②：大房子建成后回小屋休息
+          state = 'room'; petAction = ''; stopBgm(); sfx.play('rev');
+          break;
+        case 'keepgoing':
+          // 意见②：休息完继续闯关
+          level++; runGifts = 0; revivesUsed = 0; pendingUnlock = null;
+          generateLevel(level); state = 'playing';
+          break;
+        case 'tv': case 'eat': case 'sleep': {
+          // 意见②：小屋里点什么，宠物就干什么
+          petAction = id;
+          if (id === 'eat') { sfx.play('coin'); spawnBurst(view.w * 0.55, view.h * 0.60 + 20, '#fff4d6', 10); }
+          if (id === 'sleep') sfx.play('fall');
+          if (id === 'tv') sfx.play('click');
+          if (!roomVisitUsed) { roomVisitUsed = true; toast('休息好了点「继续闯关」出发！'); }
+          break;
+        }
+        case 'wearHat': cycleSlot('hat'); break;
+        case 'wearGlass': cycleSlot('glasses'); break;
+        case 'wearNeck': cycleSlot('neck'); break;
+        case 'music': case 'sound': {
+          const m = !sfx.isMuted();
+          sfx.setMuted(m);
+          toast(m ? '🔇 已静音' : '🔊 声音开启');
+          break;
+        }
       }
     }
     function refreshRevives() { return 0; }
+
+    /* 意见②：换装循环——点一次切到该部位的下一件已拥有装饰（含「不戴」） */
+    function accName(id) {
+      for (const a of ACCESSORIES) if (a.id === id) return a.name;
+      return '';
+    }
+    function cycleSlot(slot) {
+      const owned = ACCESSORIES.filter(function (a) { return a.slot === slot && save.acc.indexOf(a.id) >= 0; });
+      const cur = save.eq[slot] || '';
+      let idx = -1;
+      for (let i = 0; i < owned.length; i++) if (owned[i].id === cur) idx = i;
+      const next = (idx + 1 < owned.length) ? owned[idx + 1].id : '';
+      save.eq[slot] = next;
+      persist();
+      sfx.play('click');
+      toast(next ? '穿上' + accName(next) + '！' : '脱下来了');
+    }
 
     function syncInput() {
       input.left = keyState.left || touchState.left;
@@ -2179,8 +2885,8 @@
         keyState.jump = true; jumpHeld = true; syncInput();
       }
       else if (code === 'Escape' || code === 'KeyP') {
-        if (state === 'playing') state = 'paused';
-        else if (state === 'paused') state = 'playing';
+        if (state === 'playing') { state = 'paused'; stopBgm(); }
+        else if (state === 'paused') { state = 'playing'; startBgm(); }
       }
       else if (code === 'KeyR' && (state === 'dead' || state === 'playing')) {
         generateLevel(level); state = 'playing';
@@ -2204,9 +2910,34 @@
       level = 1;
       runGifts = 0;
       revivesUsed = 0;
+      runClean = true;             // 意见②：完美通关攒房子，重开一关重新计
+      pendingUnlock = null;
+      petAction = '';
+      dailyMode = false;           // 正常模式：真随机
+      rng = Math.random;
       generateLevel(level);
       state = 'playing';
       sfx.play('click');
+    }
+
+    /* ---------- 每日挑战（留存系统）：固定日期 seed 关卡 ---------- */
+    function todayKey() {
+      const d = new Date();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return '' + d.getFullYear() + m + dd;
+    }
+    function enterDaily() {
+      dailyMode = true;
+      dailyKey = todayKey();
+      rng = seededRng(hashStr(dailyKey));
+      level = 1;
+      runGifts = 0; revivesUsed = 0; runClean = true;
+      pendingUnlock = null; petAction = '';
+      generateLevel(1);            // 今天所有人同一关（seed 决定）
+      state = 'playing';
+      sfx.play('click');
+      toast('今日挑战：冲最高分！');
     }
 
     /* =========================================================================
@@ -2251,9 +2982,14 @@
       getState: function () { return state; },
       // 调试 / 自动化测试用
       debug: {
-        jumpToLevel: function (n) { level = n; runGifts = 0; revivesUsed = 0; generateLevel(n); state = 'playing'; },
+        jumpToLevel: function (n) { level = n; runGifts = 0; revivesUsed = 0; runClean = true; generateLevel(n); state = 'playing'; },
         getPlayer: function () { return player; },
         getLevel: function () { return { level: level, width: levelWidth, platforms: platforms, hazards: hazards, stars: stars, goal: goal }; },
+        getSave: function () { return save; },
+        getRunClean: function () { return runClean; },
+        enterDaily: function () { enterDaily(); },
+        goTo: function (s) { if (['cover','scores','achievements','daily'].indexOf(s)>=0) { state = s; stopBgm(); } },
+        grantAccessories: function () { for (const a of ACCESSORIES) if (save.acc.indexOf(a.id) < 0) save.acc.push(a.id); persist(); },
         setInput: function (k, v) { if (k === 'jump' && v && !input.jump) jumpBuffer = BUFFER; input[k] = v; if (k === 'jump' && v) jumpHeld = true; },
       },
     };
@@ -2285,6 +3021,7 @@
   /* ---------- 音效：WebAudio 程序化合成，零音频资源 ---------- */
   function createSfx() {
     let ac = null, master = null, muted = false;
+    try { muted = global.localStorage.getItem('petadv.muted') === '1'; } catch (e) {}
 
     function ensure() {
       if (ac) return ac;
@@ -2345,6 +3082,65 @@
       rev:   function () { [523, 784, 1047].forEach(function (f, i) { tone(f, f, 0.14, 'sine', 0.34, i * 0.07); }); },
     };
 
+    /* ---------- BGM（意见③）：程序化音序器，6 大主题 6 首循环曲 ----------
+     * 零音频文件：旋律/低音用 MIDI 音号表驱动 tone()，16 步一小节循环。
+     * rationale：音量压在 0.05-0.10（不盖过音效），快歌加轻 hat 打点，
+     * 调式/速度跟主题情绪走（草原欢快大调、火山紧张小调、霓虹电子琶音）。 */
+    const midi = function (n) { return 440 * Math.pow(2, (n - 69) / 12); };
+    const SONGS = [
+      { bpm: 132, wave: 'triangle', bassWave: 'sine', hat: false,   // 0 翠绿草原：C 大调五声，明亮跳跃
+        mel: [60, 64, 67, 69, 72, 69, 67, 64, 60, 64, 67, 72, null, 67, 64, 62],
+        bass: [48, 55, 52, 55] },
+      { bpm: 112, wave: 'sawtooth', bassWave: 'sine', hat: false,   // 1 金黄沙漠：phrygian 异域风
+        mel: [62, 63, 65, 67, 69, 67, 65, 63, 62, 65, 69, 65, 63, 62, null, null],
+        bass: [50, 57, 53, 57] },
+      { bpm: 96,  wave: 'sine',     bassWave: 'sine', hat: false,   // 2 冰雪世界：A 小调慢摇
+        mel: [69, null, 72, null, 71, 69, 67, 69, 64, null, 67, null, 69, 67, 64, 62],
+        bass: [45, 52, 48, 52] },
+      { bpm: 148, wave: 'square',   bassWave: 'triangle', hat: true, // 3 糖果王国：F 大调高速跳音
+        mel: [65, 69, 65, 70, 69, 65, 72, 69, 65, 69, 65, 70, 74, 72, 70, 69],
+        bass: [41, 48, 45, 48] },
+      { bpm: 156, wave: 'sawtooth', bassWave: 'sawtooth', hat: true, // 4 火山地带：E 小调紧张
+        mel: [52, 55, 59, 55, 52, 55, 59, 62, 52, 55, 59, 55, 63, 62, 59, 55],
+        bass: [40, 47, 43, 47] },
+      { bpm: 126, wave: 'square',   bassWave: 'triangle', hat: true, // 5 霓虹都市：Am 电子琶音
+        mel: [57, 60, 64, 67, 64, 60, 57, 60, 64, 67, 72, 67, 64, 60, 64, 60],
+        bass: [45, 52, 48, 52] },
+    ];
+    let bgmTimer = null, bgmStep = 0, bgmSong = null, bgmWanted = -1;
+
+    function stopBgmTimer() {
+      if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = null; }
+    }
+    function bgmTick() {
+      const s = bgmSong;
+      if (!s) return;
+      const stepMs = 60000 / s.bpm / 4;             // 16 分音符
+      const i = bgmStep % 16;
+      const m = s.mel[i];
+      if (m != null) tone(midi(m), midi(m), stepMs / 1000 * 0.92, s.wave, 0.062);
+      if (i % 4 === 0) {
+        const b = s.bass[(bgmStep / 4 | 0) % 4];
+        tone(midi(b), midi(b), stepMs / 1000 * 3.4, s.bassWave, 0.085);
+      }
+      if (s.hat && i % 2 === 1) noise(0.03, 0.045);
+      bgmStep++;
+    }
+    function startBgm(idx) {
+      bgmWanted = (typeof idx === 'number') ? idx : bgmWanted;
+      stopBgmTimer();
+      if (muted || bgmWanted < 0) return;
+      bgmSong = SONGS[bgmWanted % SONGS.length];
+      bgmStep = 0;
+      bgmTick();
+      bgmTimer = setInterval(bgmTick, 60000 / bgmSong.bpm / 4);
+    }
+    function stopBgm() {
+      bgmWanted = -1;
+      stopBgmTimer();
+      bgmSong = null;
+    }
+
     return {
       play: function (name) {
         const fn = SFX[name];
@@ -2354,7 +3150,15 @@
         const c = ensure();
         if (c && c.state === 'suspended') c.resume();
       },
-      setMuted: function (v) { muted = !!v; if (master) master.gain.value = muted ? 0 : 0.26; },
+      startBgm: startBgm,
+      stopBgm: stopBgm,
+      setMuted: function (v) {
+        muted = !!v;
+        if (master) master.gain.value = muted ? 0 : 0.26;
+        try { global.localStorage.setItem('petadv.muted', muted ? '1' : '0'); } catch (e) {}
+        if (muted) stopBgm();
+        else if (bgmWanted >= 0) startBgm(bgmWanted);
+      },
       isMuted: function () { return muted; },
     };
   }
