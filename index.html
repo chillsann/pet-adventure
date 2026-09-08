@@ -125,6 +125,84 @@
     { id: 'cape',     name: '小披风',   slot: 'neck',    need: 80 },
   ];
 
+  /* ---------- 道具表：礼物从"计数"升级成"下一关能用的工具" ----------
+   * 用户诉求③：通关拿到的礼物应该是不同的工具，例如交通工具，下一关可以使用。
+   * 两类道具：
+   *  - kind='vehicle' 载具：覆盖本关默认载具。关卡生成器按新载具的跳跃能力重算
+   *    maxGap（见 generateLevel），所以更强的载具不会遇到跳不过去的坑 —— 可行性
+   *    自动适配，这是"载具道具能做得比默认强"的前提。
+   *  - kind='buff' 增益：只改数值或加一次性保护，不触碰碰撞盒。
+   * rarity 1/2/3 = 普通/稀有/史诗，决定掉落权重（60/26/8）与外框颜色。
+   * 消耗制：装备后每关消耗 1 个 —— 用完就得再刷，这是留存闭环的一环。 */
+  const ITEMS = [
+    { id: 'shield',  name: '护盾泡泡', icon: '🛡️', rarity: 1, kind: 'buff',    desc: '免疫 1 次伤害' },
+    { id: 'magnet',  name: '磁力球',   icon: '🧲', rarity: 1, kind: 'buff',    desc: '25 秒自动吸取礼物' },
+    { id: 'boost',   name: '加速靴',   icon: '👟', rarity: 1, kind: 'buff',    desc: '20 秒移动速度 +35%' },
+    { id: 'giftbox', name: '礼物盒',   icon: '🎁', rarity: 1, kind: 'buff',    desc: '开局自带 5 份礼物' },
+    { id: 'balloon', name: '漂浮气球', icon: '🎈', rarity: 1, kind: 'vehicle', desc: '慢速但最好控制',
+      vmax: 4.2, jump: 12.8, accel: 0.40, brake: 0.945, accent: '#ff9ff3' },
+    { id: 'heart',   name: '爱心罐头', icon: '❤️', rarity: 2, kind: 'buff',    desc: '本关多 1 条命' },
+    { id: 'jetpack', name: '火箭背包', icon: '🚀', rarity: 2, kind: 'vehicle', desc: '跳得又高又远',
+      vmax: 4.6, jump: 14.8, accel: 0.48, brake: 0.880, accent: '#ff6b6b' },
+    { id: 'turbo',   name: '涡轮滑板', icon: '🛹', rarity: 2, kind: 'vehicle', desc: '全场最快的载具',
+      vmax: 7.2, jump: 11.6, accel: 0.52, brake: 0.900, accent: '#cc5de8' },
+    { id: 'cloud',   name: '筋斗云',   icon: '☁️', rarity: 3, kind: 'vehicle', desc: '传说级：跳最高还跑得快',
+      vmax: 6.0, jump: 15.5, accel: 0.50, brake: 0.900, accent: '#74c0fc' },
+  ];
+  const ITEM_BY_ID = {};
+  for (const it of ITEMS) ITEM_BY_ID[it.id] = it;
+  const RARITY_COLOR = [null, '#b9c6d6', '#4dabf7', '#cc5de8'];
+  const RARITY_NAME  = [null, '普通',    '稀有',    '史诗'];
+
+  /* ===========================================================================
+   * 留存与变现钩子（成人也要爱玩 + 广告位设计）
+   * 四条钩子各自解决一个留存问题：
+   * ① 每日签到 —— 解决"明天为什么还要打开"（连续签到奖励递增，断签重置）
+   * ② 宝箱等待 —— 解决"这一局结束后为什么还挂着"（等待解锁 or 看广告秒开）
+   * ③ 每日任务 —— 解决"上线后不知道干什么"（3 个明确目标 + 道具奖励）
+   * ④ 段位晋升 —— 解决"长期玩下去图什么"（累计分晋升头衔，成人玩家的核心驱动力）
+   * 广告点位：复活 / 奖励翻倍 / 宝箱秒开 / 免费领道具 —— 全部是"玩家主动选择"的
+   * 激励视频，不打断节奏，eCPM 也远高于强制插屏。
+   * ======================================================================== */
+  const SIGN_REWARDS = [
+    { icon: '🎁', n: 3,  label: '礼物 ×3' },
+    { icon: '🎁', n: 5,  label: '礼物 ×5' },
+    { icon: '🛡️', item: 'shield',  label: '护盾泡泡' },
+    { icon: '🎁', n: 8,  label: '礼物 ×8' },
+    { icon: '🧲', item: 'magnet',  label: '磁力球' },
+    { icon: '🎁', n: 12, label: '礼物 ×12' },
+    { icon: '🚀', item: 'jetpack', label: '火箭背包' },
+  ];
+  const RANKS = [
+    { name: '萌新铲屎官',   need: 0,     color: '#b9c6d6' },
+    { name: '见习冒险家',   need: 2000,  color: '#7bd88f' },
+    { name: '资深驯宠师',   need: 6000,  color: '#4dabf7' },
+    { name: '精英跑酷王',   need: 15000, color: '#cc5de8' },
+    { name: '传说宠物大师', need: 35000, color: '#ffd24a' },
+  ];
+  function rankOf(total) {
+    let r = RANKS[0];
+    for (const x of RANKS) if (total >= x.need) r = x;
+    return r;
+  }
+  function nextRankOf(total) {
+    for (const x of RANKS) if (total < x.need) return x;
+    return null;
+  }
+  // 宝箱：等一会儿就能白开，等不及就看广告秒开。
+  // wait 单位是秒 —— 短到"下次打开游戏时已经好了"，长到"值得花一次广告跳过"。
+  const CHESTS = [
+    { name: '木质宝箱', icon: '📦', wait: 45,  color: '#c99a5b', items: 1, minRarity: 1 },
+    { name: '白银宝箱', icon: '🎁', wait: 240, color: '#c9d6e2', items: 2, minRarity: 1 },
+    { name: '黄金宝箱', icon: '👑', wait: 720, color: '#ffd24a', items: 3, minRarity: 2 },
+  ];
+  const QUEST_DEFS = [
+    { id: 'clear2', name: '通关 2 关',        need: 2,  rewardItem: 'shield',  rewardN: 1 },
+    { id: 'gift20', name: '收集 20 份礼物',   need: 20, rewardItem: 'magnet',  rewardN: 1 },
+    { id: 'gradeS', name: '拿到 1 次 S 评价', need: 1,  rewardItem: 'jetpack', rewardN: 1 },
+  ];
+  const FREE_ITEM_CD = 4 * 3600 * 1000;   // 看广告领道具的冷却：4 小时
+
   // 成就定义（留存系统）：id + 名称 + 触发条件描述。unlock 逻辑见 unlockAchievement。
   const ACHIEVEMENTS = [
     { id: 'firstClear',  icon: '🏆', name: '初次通关',   desc: '通过第 1 关' },
@@ -209,12 +287,171 @@
     if (!Array.isArray(save.scores)) save.scores = [];
     if (!save.achievements) save.achievements = {};
     if (!save.dailyBest) save.dailyBest = {};
+    // 道具系统：bag 是背包（itemId → 数量），equipped 是下一关要带的道具
+    if (!save.bag || typeof save.bag !== 'object') save.bag = {};
+    if (typeof save.equipped !== 'string') save.equipped = '';
+    // 留存系统：签到 / 宝箱 / 每日任务 / 累计分（段位） / 免费道具冷却
+    if (!save.sign || typeof save.sign !== 'object') save.sign = { last: '', streak: 0, total: 0 };
+    if (!Array.isArray(save.chests)) save.chests = [];
+    if (!save.quests || typeof save.quests !== 'object') save.quests = { date: '', prog: {}, claimed: {} };
+    if (!save.totalScore) save.totalScore = 0;
+    if (!save.freeItemAt) save.freeItemAt = 0;
     function persist() { storage.set(SKEY, save); }
+
+    /* ---------- 道具掉落与背包 ---------- */
+    function itemWeight(it) { return it.rarity === 1 ? 60 : (it.rarity === 2 ? 26 : 8); }
+    function rollItem(minRarity) {
+      const cand = [];
+      for (const it of ITEMS) if (it.rarity >= (minRarity || 1)) cand.push(it);
+      let total = 0;
+      for (const it of cand) total += itemWeight(it);
+      let r = rng() * total;
+      for (const it of cand) { r -= itemWeight(it); if (r <= 0) return it; }
+      return cand[cand.length - 1] || ITEMS[0];
+    }
+    function grantItem(id, n) {
+      save.bag[id] = (save.bag[id] | 0) + (n || 1);
+      persist();
+    }
+    function bagCount(id) { return save.bag[id] | 0; }
+    function bagTotal() {
+      let n = 0;
+      for (const k in save.bag) if (save.bag.hasOwnProperty(k)) n += save.bag[k] | 0;
+      return n;
+    }
+    /* 消耗并生效一件携带的道具。返回 false 表示背包里没有了（自动卸下）。 */
+    function consumeEquippedItem() {
+      equippedItem = save.equipped || '';
+      if (!equippedItem) return false;
+      if (bagCount(equippedItem) <= 0) { save.equipped = ''; equippedItem = ''; persist(); return false; }
+      save.bag[equippedItem] = bagCount(equippedItem) - 1;
+      if (save.bag[equippedItem] <= 0) delete save.bag[equippedItem];
+      persist();
+      return true;
+    }
+
+    /* =========================================================================
+     * 留存钩子实现：签到 / 任务 / 宝箱 / 免费道具
+     * ====================================================================== */
+    function keyOfDate(d) {
+      return '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    }
+    function canSign() { return save.sign.last !== todayKey(); }
+    function doSign() {
+      if (!canSign()) return null;
+      const yk = keyOfDate(new Date(Date.now() - 86400000));
+      // 昨天签过 → 连签 +1；否则断签从 1 重来。连签奖励递增是"明天还要来"的动力。
+      save.sign.streak = (save.sign.last === yk) ? (save.sign.streak | 0) + 1 : 1;
+      if (save.sign.streak > SIGN_REWARDS.length) save.sign.streak = 1;   // 7 天一轮回
+      save.sign.last = todayKey();
+      save.sign.total = (save.sign.total | 0) + 1;
+      const r = SIGN_REWARDS[(save.sign.streak - 1) % SIGN_REWARDS.length];
+      if (r.item) grantItem(r.item, 1);
+      else { save.gifts = (save.gifts | 0) + r.n; persist(); }
+      // 签到额外送一个木质宝箱（增加每日登录动机）
+      grantChest(0);
+      return r;
+    }
+
+    function ensureQuests() {
+      const tk = todayKey();
+      if (save.quests.date !== tk) {
+        save.quests = { date: tk, prog: {}, claimed: {} };
+        persist();
+      }
+    }
+    function bumpQuest(id, n) {
+      ensureQuests();
+      save.quests.prog[id] = (save.quests.prog[id] | 0) + (n || 1);
+      persist();
+    }
+    function questProgress(q) { ensureQuests(); return Math.min(save.quests.prog[q.id] | 0, q.need); }
+    function questDone(q) { ensureQuests(); return (save.quests.prog[q.id] | 0) >= q.need; }
+    function questClaimed(q) { ensureQuests(); return !!save.quests.claimed[q.id]; }
+    function claimQuest(q) {
+      ensureQuests();
+      if (!questDone(q) || questClaimed(q)) return false;
+      save.quests.claimed[q.id] = 1;
+      grantItem(q.rewardItem, q.rewardN);
+      persist();
+      return true;
+    }
+    function questsPending() {
+      ensureQuests();
+      let n = 0;
+      for (const q of QUEST_DEFS) if (questDone(q) && !questClaimed(q)) n++;
+      return n;
+    }
+
+    function chestReady(c) { return Date.now() - c.at >= CHESTS[c.t].wait * 1000; }
+    function chestLeftSec(c) { return Math.max(0, Math.ceil((CHESTS[c.t].wait * 1000 - (Date.now() - c.at)) / 1000)); }
+    function grantChest(ti) {
+      if (save.chests.length >= 4) return false;
+      save.chests.push({ t: ti, at: Date.now() });
+      persist();
+      return true;
+    }
+    function openChestAt(idx) {
+      const c = save.chests[idx];
+      if (!c) return null;
+      const def = CHESTS[c.t];
+      const got = [];
+      for (let i = 0; i < def.items; i++) {
+        const it = rollItem(def.minRarity);
+        grantItem(it.id, 1);
+        got.push(it);
+      }
+      save.chests.splice(idx, 1);
+      persist();
+      return got;
+    }
+    /* 开箱入口：到点直接开，没到点走激励视频秒开 —— 广告位之一 */
+    function openChestFlow(idx) {
+      const c = save.chests[idx];
+      if (!c) return;
+      if (chestReady(c)) { finishOpenChest(idx); return; }
+      ads.showRewarded('chest', function (ok) {
+        if (!ok) { toast('广告没看完，宝箱还得再等等'); return; }
+        finishOpenChest(idx);
+      });
+    }
+    function finishOpenChest(idx) {
+      const got = openChestAt(idx);
+      if (!got) return;
+      sfx.play('open');
+      let s = '';
+      for (const it of got) s += it.icon + it.name + ' ';
+      toast('开箱获得：' + s);
+    }
+    /* 看广告免费领一件稀有以上道具（4 小时冷却）—— 广告位之二 */
+    function freeItemByAd() {
+      const left = freeItemLeftMs();
+      if (left > 0) { toast('冷却中，' + Math.ceil(left / 60000) + ' 分钟后可再领'); return; }
+      ads.showRewarded('item', function (ok) {
+        if (!ok) { toast('广告没看完'); return; }
+        save.freeItemAt = Date.now();
+        const it = rollItem(2);        // 保底稀有：一次广告的回报要看得见，否则没人点
+        grantItem(it.id, 1);
+        persist();
+        sfx.play('item');
+        toast('获得 ' + it.icon + ' ' + it.name + '！');
+      });
+    }
+    function freeItemLeftMs() {
+      return Math.max(0, FREE_ITEM_CD - (Date.now() - (save.freeItemAt || 0)));
+    }
 
     /* ---------- 运行时状态 ---------- */
     let state = 'cover';   // cover | playing | paused | dead | cleared | ad
     let level = 1;
     let runGifts = 0;      // 本次挑战累计
+    /* 道具系统（本次跑关内的生效状态）：
+     * shieldLeft = 还能挡几次伤害；magnetLeft / boostLeft = 剩余生效帧数。
+     * 由玩家开局携带的道具注入（见 startRun），关卡结束或返回封面时清零。
+     * 只影响数值与渲染，不触碰碰撞盒 —— 和 PET_VIS_SCALE 同样的解耦思路。 */
+    let shieldLeft = 0, magnetLeft = 0, boostLeft = 0;
+    let equippedItem = '';   // 本次跑关携带的道具 id（'' 表示没带）
+    let droppedItems = [];   // 本次通关掉落的道具（结算界面展示"你拿到了什么"）
     let pet = PETS[0];
     let vehicle = VEHICLES[0];
     let theme = THEMES[0];
@@ -308,7 +545,15 @@
 
     function generateLevel(lv) {
       theme = THEMES[(lv - 1) % THEMES.length];
-      vehicle = VEHICLES[(lv - 1) % VEHICLES.length];
+      const baseVehicle = VEHICLES[(lv - 1) % VEHICLES.length];
+      // 道具载具：关卡难度（maxGap）永远按默认载具算，算完再换成玩家携带的载具。
+      // 这样"更强的载具"只会让关卡更好过，绝不会生成跳不过去的坑 —— 道具是纯收益，
+      // 也让平衡工作从"每个载具都要重新验证关卡"简化为一次性验证。
+      const itEq = ITEM_BY_ID[equippedItem];
+      vehicle = (itEq && itEq.kind === 'vehicle')
+        ? { id: itEq.id, name: itEq.name, emoji: itEq.icon, vmax: itEq.vmax, jump: itEq.jump,
+            accel: itEq.accel, brake: itEq.brake, accent: itEq.accent, fromItem: true }
+        : baseVehicle;
 
       // 每日挑战用固定 seed 随机源；普通模式恢复真随机（保证每次都不一样）
       if (!dailyMode) rng = Math.random;
@@ -317,7 +562,7 @@
       // [PLACEHOLDER] 目标单局 30-60s，等 playtest 实测均速后回调。
       levelWidth = 3200 + lv * 300;
 
-      const maxGap = Math.floor(jumpDistance(vehicle) * 0.72);   // 留 28% 容错，点按跳也能过
+      const maxGap = Math.floor(jumpDistance(baseVehicle) * 0.72);   // 留 28% 容错，点按跳也能过
       const minGap = 62;
       const gapChance = clamp(0.30 + lv * 0.015, 0.30, 0.50);
 
@@ -451,7 +696,9 @@
       player = {
         x: 90, y: startSeg.y - 50, w: 44, h: 50,
         vx: 0, vy: 0, onGround: false, dir: 1,
-        animT: 0, invuln: 0, lives: 3, dead: false,
+        animT: 0, invuln: 0, dead: false,
+        lives: (equippedItem === 'heart') ? 4 : 3,   // 道具「爱心罐头」多 1 条命
+        landT: 0,                                    // 落地压扁动画计时
       };
       checkpoint = { x: 90, y: startSeg.y - 50 };
       cameraX = 0;
@@ -464,6 +711,32 @@
       startBgm((lv - 1) % 6);      // 意见③：每一关不同的背景音乐（跟主题走）
     }
 
+    /* 进入新关卡前调用：消耗背包里的一件道具，把效果注入本关。
+     * 消耗制是刻意设计 —— 用完了就得再去刷一关，这是留存闭环的一环，
+     * 也让「看广告领道具」这个变现点有实际需求支撑（见 ads 的 item 分支）。
+     * 调用顺序必须是：runGifts 重置 → prepareRunItem → generateLevel。 */
+    function prepareRunItem() {
+      shieldLeft = 0; magnetLeft = 0; boostLeft = 0;
+      equippedItem = '';
+      const id = save.equipped || '';
+      if (!id) return;
+      if (bagCount(id) <= 0) { save.equipped = ''; persist(); return; }
+      if (!consumeEquippedItem()) { save.equipped = ''; persist(); return; }
+      equippedItem = id;
+      if (id === 'shield') shieldLeft = 1;
+      else if (id === 'magnet') magnetLeft = 1500;   // 25 秒 @60fps
+      else if (id === 'boost') boostLeft = 1200;     // 20 秒
+      else if (id === 'giftbox') runGifts += 5;
+      // heart（多 1 命）与 vehicle 类载具由 generateLevel 读 equippedItem 生效
+    }
+    /* 重玩本关：不重复消耗道具，但把限时效果重置回满 —— 否则失败重来会白白损失时长 */
+    function refreshItemEffects() {
+      shieldLeft = 0; magnetLeft = 0; boostLeft = 0;
+      if (equippedItem === 'shield') shieldLeft = 1;
+      else if (equippedItem === 'magnet') magnetLeft = 1500;
+      else if (equippedItem === 'boost') boostLeft = 1200;
+    }
+
     /* =========================================================================
      * 6. 物理步进（固定 60Hz）
      * ====================================================================== */
@@ -471,6 +744,9 @@
       if (state !== 'playing') { stepParticles(); return; }
       const p = player;
       timeAcc += FIXED_DT;
+      if (p.landT > 0) p.landT--;   // 落地压扁动画倒计时（squash & stretch）
+      if (magnetLeft > 0) magnetLeft--;   // 道具「磁力球」剩余帧
+      if (boostLeft > 0) boostLeft--;     // 道具「加速靴」剩余帧
 
       /* --- 水平 --- */
       const dirIn = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -481,7 +757,8 @@
         p.vx *= vehicle.brake;              // 松手滑行：brake 越接近 1 越难刹
         if (Math.abs(p.vx) < 0.12) p.vx = 0;
       }
-      p.vx = clamp(p.vx, -vehicle.vmax, vehicle.vmax);
+      const vmaxNow = vehicle.vmax * (boostLeft > 0 ? 1.35 : 1);   // 道具「加速靴」+35% 极速
+      p.vx = clamp(p.vx, -vmaxNow, vmaxNow);
 
       /* --- 跳跃：土狼时间 + 输入缓冲 + 可变跳高 --- */
       if (p.onGround) coyote = COYOTE; else if (coyote > 0) coyote--;
@@ -542,6 +819,7 @@
           }
           p.vy = 0;
           p.onGround = true;
+          if (wasAir) p.landT = 11;
         } else if (p.vy < 0) {
           // 顶到平台底面：只停住上升，不做位置传送。
           // 平台厚度是 420px，若照搬「推到 s.y + s.h」会把玩家瞬移到屏幕外直接判坠落。
@@ -604,6 +882,19 @@
       }
 
       /* --- 小礼物 --- */
+      // 道具「磁力球」：先把 170px 内的礼物吸过来，再走拾取判定
+      if (magnetLeft > 0) {
+        const pcx = p.x + p.w / 2, pcy = p.y + p.h / 2;
+        for (const s of stars) {
+          if (s.taken) continue;
+          const dx = pcx - s.x, dy = pcy - s.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 4 && d2 < 170 * 170) {
+            const d = Math.sqrt(d2);
+            s.x += dx / d * 4.6; s.y += dy / d * 4.6;
+          }
+        }
+      }
       for (const s of stars) {
         if (s.taken) continue;
         if (aabb(p.x, p.y, p.w, p.h, s.x - s.r, s.y - s.r, s.r * 2, s.r * 2)) {
@@ -612,6 +903,9 @@
           runCombo = Math.max(runCombo, comboCount);
           const gain = 1;
           runGifts += gain;
+          // 记录礼物收集进度（用于任务追踪）
+          if (!window._questGiftCount) window._questGiftCount = 0;
+          window._questGiftCount++;
           // 评分：每星 30 + 连击加成（连击越高越值钱，奖励连续无伤吃星）
           const pts = 30 + (comboCount - 1) * 5;
           runScore += pts;
@@ -662,6 +956,17 @@
     function hurt(amount, isFall) {
       const p = player;
       if (p.invuln > 0 || p.dead) return;
+      // 道具「护盾泡泡」：优先扣护盾，不掉血、不断连击、不破坏完美通关
+      if (shieldLeft > 0) {
+        shieldLeft--;
+        p.invuln = 78;
+        sfx.play('shield');
+        vibrate(30);
+        spawnBurst(p.x + p.w / 2, p.y + p.h / 2, '#6fe3ff', 18);
+        pushFloater(p.x + p.w / 2, p.y - 8, '🛡 护盾挡下！', '#6fe3ff');
+        if (isFall) respawnAtCheckpoint();
+        return;
+      }
       // 三心机制：撞到/掉坑各扣 1 心，扣光才死亡。掉坑扣心后回检查点重来。
       p.lives -= amount;
       comboCount = 0;
@@ -728,7 +1033,23 @@
       save.scores.push({ score: runScore, level: level, pet: pet.id, date: Date.now() });
       save.scores.sort(function (a, b) { return b.score - a.score; });
       if (save.scores.length > 10) save.scores.length = 10;
-      // 意见②：礼物里开出装饰品（确定性解锁表：累计礼物达标即入手）。
+      // 道具掉落（用户诉求③）：每关必掉 1 件；S 评价或每 5 关额外掉 1 件，且第 5 关保底稀有以上。
+      // rationale：必掉 1 件保证"每关都有收获"的正反馈；每 5 关的保底稀有给长期玩家
+      // 一个可预期的惊喜节奏，避免连开 10 个普通道具的挫败感。
+      droppedItems = [];
+      const d1 = rollItem(1);
+      grantItem(d1.id, 1); droppedItems.push(d1);
+      if (runGrade.g === 'S' || level % 5 === 0) {
+        const d2 = rollItem(level % 5 === 0 ? 2 : 1);
+        grantItem(d2.id, 1); droppedItems.push(d2);
+      }
+      // 留存系统：通关后更新任务进度 + 释放宝箱槽位
+      bumpQuest('clear2', 1);
+      if (runGrade.g === 'S') bumpQuest('gradeS', 1);
+      bumpQuest('gift20', questGiftCount);   // 本关收集的礼物数
+      grantChest(0);    // 每通关一次释放一个木质宝箱
+      // 重置本关任务进度追踪
+      questGiftCount = 0;
       for (const a of ACCESSORIES) {
         if (save.acc.indexOf(a.id) < 0 && (save.gifts | 0) >= a.need) {
           save.acc.push(a.id);
@@ -750,6 +1071,8 @@
       if (runCombo >= 5) unlockAchievement('combo5');
       if (runGrade.g === 'S') unlockAchievement('gradeS');
       if (save.house >= 3) unlockAchievement('house3');
+      // 段位系统：累计总分
+      save.totalScore = (save.totalScore | 0) + runScore;
       persist();
     }
 
@@ -811,34 +1134,66 @@
     const ART = {};
 
     // —— 通用眼 / 腮红 / 白描边圆 ——
+    /* ---------- 功夫熊猫式 Q 版改造（3 条通用法则） ----------
+     * ① 厚描边：所有白外轮廓从 2.2-2.4 加到 3.2-3.6 —— 卡通角色的"贴纸感"，
+     *    也是功夫熊猫那种圆润厚实轮廓的来源，小屏上辨识度显著提升。
+     * ② 体积感：头/身各加一层"左上亮、右下暗"的渐变，形状从饼变球。
+     * ③ 幼态化：瞳孔放大（0.82r → 0.90r）+ 双高光 + 下眼睑反光 —— 大瞳孔
+     *    高反光是婴儿图式（baby schema），直接触发"可爱"感知。
+     * 这三条改在底层原语上，9 只宠物全部受益，无需逐只重画。 */
     ART.eye = function (g, x, y, r, t, wink) {
       const blink = (t % 3.1) < 0.11;
       if (blink || wink) {
-        g.strokeStyle = '#2e2622'; g.lineWidth = Math.max(1.4, r * 0.34); g.lineCap = 'round';
-        g.beginPath(); g.moveTo(x - r * 0.7, y); g.lineTo(x + r * 0.7, y); g.stroke();
+        // 眨眼改成向上弯的"笑眼"弧线（旧版是直线，闭眼时像死掉）
+        g.strokeStyle = '#2e2622'; g.lineWidth = Math.max(1.6, r * 0.38); g.lineCap = 'round';
+        g.beginPath();
+        g.moveTo(x - r * 0.78, y - r * 0.06);
+        g.quadraticCurveTo(x, y + r * 0.46, x + r * 0.78, y - r * 0.06);
+        g.stroke();
         return;
       }
       g.fillStyle = '#fff';
-      g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
+      g.beginPath(); g.ellipse(x, y, r, r * 1.06, 0, 0, 6.283); g.fill();
       g.fillStyle = '#2e2622';
-      g.beginPath(); g.arc(x, y, r * 0.82, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(x + r * 0.05, y + r * 0.05, r * 0.90, 0, 6.283); g.fill();
+      // 主高光（左上）
       g.fillStyle = '#fff';
-      g.beginPath(); g.arc(x - r * 0.28, y - r * 0.3, r * 0.3, 0, 6.283); g.fill();
-      g.beginPath(); g.arc(x + r * 0.3, y + r * 0.32, r * 0.13, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(x - r * 0.30, y - r * 0.34, r * 0.34, 0, 6.283); g.fill();
+      // 副高光（右下小点）
+      g.beginPath(); g.arc(x + r * 0.32, y + r * 0.36, r * 0.16, 0, 6.283); g.fill();
+      // 下眼睑反光：让眼睛"水汪汪"
+      g.fillStyle = 'rgba(255,255,255,0.30)';
+      g.beginPath(); g.ellipse(x, y + r * 0.64, r * 0.48, r * 0.17, 0, 0, 6.283); g.fill();
     };
     ART.cheek = function (g, x, y, r) {
-      g.fillStyle = 'rgba(255,120,120,0.42)';
+      g.fillStyle = 'rgba(255,105,120,0.50)';
       g.beginPath(); g.ellipse(x, y, r, r * 0.62, 0, 0, 6.283); g.fill();
+      // 两道斜笔触（日系腮红，卡通感比纯色块强）
+      g.strokeStyle = 'rgba(228,66,92,0.32)';
+      g.lineWidth = Math.max(0.9, r * 0.15); g.lineCap = 'round';
+      for (let i = -1; i <= 1; i++) {
+        g.beginPath();
+        g.moveTo(x + i * r * 0.42 - r * 0.18, y + r * 0.26);
+        g.lineTo(x + i * r * 0.42 + r * 0.18, y - r * 0.26);
+        g.stroke();
+      }
     };
     ART.head = function (g, x, y, R, fill) {
       g.fillStyle = '#ffffff';
-      g.beginPath(); g.arc(x, y, R + 2.4, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(x, y, R + 3.4, 0, 6.283); g.fill();
       g.fillStyle = fill;
+      g.beginPath(); g.arc(x, y, R, 0, 6.283); g.fill();
+      // 体积渐变：左上打亮、右下压暗
+      const grd = g.createLinearGradient(x - R * 0.5, y - R, x + R * 0.4, y + R);
+      grd.addColorStop(0, 'rgba(255,255,255,0.30)');
+      grd.addColorStop(0.55, 'rgba(255,255,255,0)');
+      grd.addColorStop(1, 'rgba(0,0,0,0.12)');
+      g.fillStyle = grd;
       g.beginPath(); g.arc(x, y, R, 0, 6.283); g.fill();
     };
     ART.earRound = function (g, x, y, r, fill, inner) {
       g.fillStyle = '#fff';
-      g.beginPath(); g.arc(x, y, r + 2.2, 0, 6.283); g.fill();
+      g.beginPath(); g.arc(x, y, r + 3.2, 0, 6.283); g.fill();
       g.fillStyle = fill;
       g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
       if (inner) { g.fillStyle = inner; g.beginPath(); g.arc(x, y, r * 0.5, 0, 6.283); g.fill(); }
@@ -848,7 +1203,7 @@
       g.translate(x, y);
       g.fillStyle = '#fff';
       g.beginPath();
-      g.moveTo(-w / 2 - 2, 2); g.lineTo(0, -h - 2); g.lineTo(w / 2 + 2, 2);
+      g.moveTo(-w / 2 - 3.2, 2); g.lineTo(0, -h - 3.2); g.lineTo(w / 2 + 3.2, 2);
       g.closePath(); g.fill();
       g.fillStyle = fill;
       g.beginPath();
@@ -1131,14 +1486,21 @@
     };
     // 头下方小身体白描边（带底白边）
     ART.body = function (g, x, y, rx, ry, fill, belly, strokeW) {
+      const sw = strokeW === 0 ? 0 : 3.2;
       g.fillStyle = '#fff';
-      g.beginPath(); g.ellipse(x, y, rx + (strokeW === 0 ? 0 : 2.2), ry + (strokeW === 0 ? 0 : 2.2), 0, 0, 6.283); g.fill();
+      g.beginPath(); g.ellipse(x, y, rx + sw, ry + sw, 0, 0, 6.283); g.fill();
       g.fillStyle = fill;
       g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, 6.283); g.fill();
       if (belly) {
         g.fillStyle = belly;
-        g.beginPath(); g.ellipse(x, y + 1, rx * 0.55, ry * 0.6, 0, 0, 6.283); g.fill();
+        g.beginPath(); g.ellipse(x, y + 1.5, rx * 0.58, ry * 0.62, 0, 0, 6.283); g.fill();
       }
+      const grd = g.createLinearGradient(x - rx, y - ry, x + rx * 0.6, y + ry);
+      grd.addColorStop(0, 'rgba(255,255,255,0.26)');
+      grd.addColorStop(0.5, 'rgba(255,255,255,0)');
+      grd.addColorStop(1, 'rgba(0,0,0,0.12)');
+      g.fillStyle = grd;
+      g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, 6.283); g.fill();
     };
     ART.paw = function (g, x, y, w, h, fill) {
       g.fillStyle = fill;
@@ -1148,14 +1510,51 @@
     // 意见①：孩子要求「动物大一点点、迪士尼风、头大身小」。
     // PET_VIS_SCALE 只放大视觉（1.2×），碰撞盒 w:44 h:50 保持不变——
     // 碰撞盒一变，跳跃距离/平台手感全要重新调，视觉与手感解耦是这里的关键取舍。
-    const PET_VIS_SCALE = 1.2;
+    const PET_VIS_SCALE = 1.40;   // 旧值 1.2：孩子说"还不够大"，功夫熊猫式大头需要更夸张的体积
     ART.drawPet = function (id, g, x, y, s, flip, t, run, acc) {
       g.save();
       g.translate(x, y);
+      // squash & stretch（挤压拉伸）：g.__sq 由调用方按运动状态设置。
+      // 这是卡通动画 12 法则之首 —— 落地压扁、起跳拉伸，角色瞬间"有重量、有弹性"，
+      // 比单纯放大尺寸更能传达可爱与活力。碰撞盒完全不受影响。
+      const sq = g.__sq;
+      if (sq) g.scale(sq[0], sq[1]);
       g.scale(flip * s * PET_VIS_SCALE, s * PET_VIS_SCALE);
       const fn = ART.pets[id] || ART.pets.cat;
       fn(g, t, run);
       if (acc) ART.drawAcc(g, acc, t);   // 意见②：帽子/眼镜/围巾（意见②的穿戴渲染）
+      if (g.__mood) ART.drawMood(g, g.__mood, t);
+      g.restore();
+    };
+
+    /* 头顶情绪符号：让角色"有反应"，是低成本高回报的可爱度投资 */
+    ART.drawMood = function (g, mood, t) {
+      g.save();
+      if (mood === 'hurt') {
+        // 汗滴（右上，带轻微晃动）
+        const sw = Math.sin(t * 8) * 1.6;
+        g.fillStyle = '#7fd4ff';
+        g.beginPath();
+        g.moveTo(20 + sw, -40);
+        g.quadraticCurveTo(26 + sw, -32, 20 + sw, -28);
+        g.quadraticCurveTo(14 + sw, -32, 20 + sw, -40);
+        g.closePath(); g.fill();
+      } else if (mood === 'happy') {
+        // 上浮的小星星（两个交替闪）
+        for (let i = 0; i < 2; i++) {
+          const ph = (t * 1.6 + i * 0.5) % 1;
+          g.globalAlpha = 1 - ph;
+          ART.star(g, -18 + i * 36, -40 - ph * 20, 5.2, '#fff59a', '#f2b705');
+        }
+      } else if (mood === 'shield') {
+        // 护盾泡泡（道具：护盾生效时）
+        g.globalAlpha = 0.30 + Math.sin(t * 6) * 0.08;
+        g.fillStyle = '#6fe3ff';
+        g.beginPath(); g.arc(0, 6, 46, 0, 6.283); g.fill();
+        g.globalAlpha = 0.85;
+        g.strokeStyle = '#bff4ff'; g.lineWidth = 3;
+        g.beginPath(); g.arc(0, 6, 46, 0, 6.283); g.stroke();
+      }
       g.restore();
     };
 
@@ -1849,9 +2248,22 @@
       // 载具（先画 → 在角色下层）
       ART.drawVehicle(vehicle.id, ctx, cx, groundY, flip, vehicle.accent, p.animT);
 
-      // 宠物（骑在载具上，头中心 ≈ 车座上方；意见① 放大后锚点 -54 → -58）
+      // 宠物（骑在载具上，头中心 ≈ 车座上方；放大到 1.40 后锚点 -58 → -63）
       const tAnim = p.animT + (run ? p.x * 0.018 : 0);
-      drawPetWithEq(pet.id, ctx, cx, groundY - 58 + bounce * 0.85, 1, flip, tAnim, run);
+      // squash & stretch：落地压扁 → 上升拉伸 → 站立回正
+      let sqx = 1, sqy = 1;
+      const lt = p.landT || 0;
+      if (lt > 0) {
+        const f = lt / 11;                       // 落地瞬间最强，11 帧内回弹
+        sqy = 1 - 0.22 * f; sqx = 1 + 0.18 * f;
+      } else if (!p.onGround) {
+        const f = clamp(-p.vy / 12, -0.35, 1);   // 上升越快，纵向拉得越长
+        sqy = 1 + 0.16 * f; sqx = 1 - 0.12 * f;
+      }
+      ctx.__sq = [sqx, sqy];
+      ctx.__mood = (shieldLeft > 0) ? 'shield' : ((p.invuln > 40) ? 'hurt' : (run ? 'happy' : ''));
+      drawPetWithEq(pet.id, ctx, cx, groundY - 63 + bounce * 0.85, 1, flip, tAnim, run);
+      ctx.__sq = null; ctx.__mood = '';
 
       ctx.restore();
     }
@@ -1980,6 +2392,38 @@
       ctx.globalAlpha = mutedOn ? 0.55 : 1;
       drawSpeakerIcon(198, 35, 20, mutedOn);
       ctx.globalAlpha = 1;
+
+      // 生效中的道具条：左上角第二行。玩家必须能一眼看到"我的道具还剩多久"，
+      // 否则限时道具的时间感是隐形的，价值感知会大打折扣。
+      const buffs = [];
+      if (shieldLeft > 0) buffs.push({ icon: '🛡️', t: shieldLeft, max: 1, c: '#6fe3ff' });
+      if (magnetLeft > 0) buffs.push({ icon: '🧲', t: magnetLeft, max: 1500, c: '#ff9ff3' });
+      if (boostLeft > 0) buffs.push({ icon: '👟', t: boostLeft, max: 1200, c: '#ffd24a' });
+      const veh = ITEM_BY_ID[equippedItem];
+      if (veh && veh.kind === 'vehicle') buffs.push({ icon: veh.icon, t: -1, max: 1, c: veh.accent });
+      if (buffs.length) {
+        let bx2 = 16;
+        for (const b of buffs) {
+          ctx.fillStyle = 'rgba(10,8,18,0.52)';
+          roundRect(bx2, 64, 54, 42, 12); ctx.fill();
+          ctx.font = '19px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = '#fff';
+          ctx.fillText(b.icon, bx2 + 27, 79);
+          if (b.t > 0) {
+            const f = clamp(b.t / b.max, 0, 1);
+            ctx.fillStyle = 'rgba(255,255,255,0.22)';
+            roundRect(bx2 + 8, 94, 38, 5, 2.5); ctx.fill();
+            ctx.fillStyle = b.c;
+            roundRect(bx2 + 8, 94, Math.max(3, 38 * f), 5, 2.5); ctx.fill();
+          } else {
+            ctx.font = 'bold 9px "PingFang SC","Microsoft YaHei",sans-serif';
+            ctx.fillStyle = b.c;
+            ctx.fillText('载具', bx2 + 27, 97);
+          }
+          bx2 += 60;
+        }
+      }
 
       // 右上：礼物（手绘礼物图标 + 数字）—— 给暂停键留出右侧空间
       panel(w - 198, 12, 128, 46, 23);
@@ -2133,9 +2577,21 @@
       } else if (state === 'scores' || state === 'achievements') {
         // 留存系统子界面：一个返回按钮
         btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
+      } else if (state === 'bag') {
+        // 背包：3×3 卡片热区（卡片由 drawBag 绘制，这里只注册隐形命中区）
+        const bw = Math.min(150, (w - 60) / 3), gap = 12;
+        const gx = w / 2 - (3 * bw + 2 * gap) / 2, gy = h * 0.24;
+        for (let i = 0; i < ITEMS.length; i++) {
+          const r = Math.floor(i / 3), c = i % 3;
+          btn(gx + c * (bw + gap), gy + r * (bw + gap), bw, bw, '', 'item:' + ITEMS[i].id, false, true);
+        }
+        btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
       } else if (state === 'daily') {
         // 每日挑战：开始挑战 + 返回
         btn(w / 2 - 130, h * 0.52, 260, 54, '开始挑战', 'dailyStart');
+        btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
+      } else if (state === 'sign' || state === 'chest' || state === 'quest' || state === 'freeItem') {
+        // 留存系统子界面：返回按钮
         btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
       }
     }
@@ -2167,11 +2623,16 @@
       if (save.house >= 3) {
         overlayButtons.push({ x: 16, y: h - 72, w: 122, h: 52, label: '🏠 小屋', id: 'room' });
       }
-      // 留存系统入口（右下角竖排：排行榜 / 成就 / 每日挑战）
+      // 留存系统入口（右下角竖排：排行榜 / 成就 / 每日挑战 / 签到 / 宝箱 / 任务 / 免费道具 / 背包）
       const entrys = [
         { id: 'scores', label: '🏆 排行榜' },
         { id: 'achievements', label: '🎖 成就' },
         { id: 'daily', label: '📅 每日挑战' },
+        { id: 'sign', label: '📌 签到' },
+        { id: 'chest', label: '📦 宝箱' },
+        { id: 'quest', label: '📋 任务' },
+        { id: 'freeItem', label: '🎁 免费道具' },
+        { id: 'bag', label: '🎒 背包 ' + (bagTotal() ? bagTotal() : '') },
       ];
       const ex = w - 124, ey = h - 72;
       for (let i = 0; i < entrys.length; i++) {
@@ -2199,6 +2660,11 @@
       else if (state === 'scores') drawScores(w, h);
       else if (state === 'achievements') drawAchievements(w, h);
       else if (state === 'daily') drawDaily(w, h);
+      else if (state === 'bag') drawBag(w, h);
+      else if (state === 'sign') drawSign(w, h);
+      else if (state === 'chest') drawChests(w, h);
+      else if (state === 'quest') drawQuests(w, h);
+      else if (state === 'freeItem') drawFreeItem(w, h);
 
       drawOverlayButtons();
       ctx.restore();
@@ -2236,7 +2702,37 @@
       ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.92)';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('选一只宠物，骑上载具，闯过 ' + THEMES.length + ' 大主题关卡', cx, topY + 36);
+      ctx.fillText('选一只宠物，骑上载具，闯过 ' + THEMES.length + ' 大主题关卡', cx, topY + 58);
+      // 当前携带的道具：让「下一关能用」这件事在选宠这一步就被看见，而不是埋在背包里
+      const eqIt = ITEM_BY_ID[save.equipped];
+      if (eqIt && bagCount(eqIt.id) > 0) {
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#ffd24a';
+        ctx.fillText('下一关携带：' + eqIt.icon + ' ' + eqIt.name + ' · ' + eqIt.desc, cx, topY + 58);
+      }
+      // 段位系统：封面显示当前段位 + 进度条
+      const rk = rankOf(save.totalScore || 0);
+      const nrk = nextRankOf(save.totalScore || 0);
+      ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = rk.color;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('段位：' + rk.name, cx, topY + 78);
+      if (nrk) {
+        const prog = clamp((save.totalScore - rk.need) / (nrk.need - rk.need), 0, 1);
+        ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.fillText(rk.name + ' → ' + nrk.name + '（' + (save.totalScore | 0) + '/' + nrk.need + '）', cx, topY + 96);
+        // 进度条
+        const barW = 160, barH = 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        roundRect(cx - barW / 2, topY + 106, barW, barH, 4); ctx.fill();
+        ctx.fillStyle = rk.color;
+        roundRect(cx - barW / 2, topY + 106, barW * prog, barH, 4); ctx.fill();
+      } else {
+        ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#ffd24a';
+        ctx.fillText('满级！' + rk.name, cx, topY + 96);
+      }
 
       // 宠物网格（几何与 buildCoverButtons 共用 coverGrid）
       const grid = coverGrid();
@@ -2539,6 +3035,24 @@
       drawGiftIconSmall(ctx, cx - 58, topY + 150, 14);
       ctx.textAlign = 'left';
       ctx.fillText('本关礼物 ' + runGifts, cx - 38, topY + 150);
+      // 道具掉落：本关拿到了什么工具。放在礼物同一行，避免挤压下方按钮空间。
+      if (droppedItems.length) {
+        let dx = cx + 58;
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.fillText('获得', dx, topY + 150);
+        dx += 36;
+        for (const it of droppedItems) {
+          ctx.font = '16px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+          ctx.fillStyle = '#fff';
+          ctx.fillText(it.icon, dx, topY + 151);
+          dx += 21;
+          ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.fillStyle = RARITY_COLOR[it.rarity];
+          ctx.fillText(it.name, dx, topY + 150);
+          dx += ctx.measureText(it.name).width + 20;
+        }
+      }
       // 意见②：本关开出的装饰品 / 房子进度
       ctx.font = '900 15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.textAlign = 'center';
@@ -2652,6 +3166,171 @@
       drawPetWithEq(pet.id, ctx, w / 2, h * 0.30 + 120, 1.1, 1, timeAcc, false);
     }
 
+    /* ---------- 背包（道具系统 UI） ---------- */
+    function drawBag(w, h) {
+      gradientTitle('🎒 我的背包', w / 2, h * 0.09, view.portrait ? 28 : 34);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.fillText('点一下携带，下一关开局生效（每关消耗 1 个）', w / 2, h * 0.09 + 30);
+
+      // 几何必须与 overlayLayout 的 bag 分支完全一致，否则点不准
+      const bw = Math.min(150, (w - 60) / 3), gap = 12;
+      const gx = w / 2 - (3 * bw + 2 * gap) / 2, gy = h * 0.24;
+      for (let i = 0; i < ITEMS.length; i++) {
+        const it = ITEMS[i];
+        const r = Math.floor(i / 3), c = i % 3;
+        const x = gx + c * (bw + gap), y = gy + r * (bw + gap);
+        const n = bagCount(it.id);
+        const owned = n > 0;
+        const eq = (save.equipped === it.id);
+        ctx.save();
+        ctx.globalAlpha = owned ? 1 : 0.40;
+        ctx.fillStyle = eq ? 'rgba(255,210,74,0.20)' : 'rgba(255,255,255,0.09)';
+        roundRect(x, y, bw, bw, 14); ctx.fill();
+        ctx.strokeStyle = RARITY_COLOR[it.rarity];
+        ctx.lineWidth = eq ? 3.6 : 2;
+        roundRect(x, y, bw, bw, 14); ctx.stroke();
+        ctx.font = (bw * 0.32).toFixed(0) + 'px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(it.icon, x + bw / 2, y + bw * 0.33);
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(it.name, x + bw / 2, y + bw * 0.60);
+        ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = owned ? 'rgba(255,255,255,0.82)' : 'rgba(255,255,255,0.55)';
+        ctx.fillText(owned ? ('×' + n) : '未获得', x + bw / 2, y + bw * 0.78);
+        ctx.font = '10px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = RARITY_COLOR[it.rarity];
+        ctx.fillText(RARITY_NAME[it.rarity], x + bw / 2, y + bw * 0.92);
+        ctx.restore();
+        if (eq) {
+          ctx.fillStyle = '#ffd24a';
+          roundRect(x + bw - 52, y + 6, 46, 20, 10); ctx.fill();
+          ctx.fillStyle = '#6b4a00';
+          ctx.font = 'bold 11px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText('已装备', x + bw - 29, y + 16);
+        }
+      }
+      const cur = ITEM_BY_ID[save.equipped];
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (cur) {
+        ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#ffd24a';
+        ctx.fillText('已选：' + cur.icon + ' ' + cur.name + ' — ' + cur.desc, w / 2, gy + 3 * (bw + gap) + 18);
+      } else {
+        ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.fillText('不带道具也能跑，带了更轻松', w / 2, gy + 3 * (bw + gap) + 18);
+      }
+    }
+
+    /* ---------- 签到界面 ---------- */
+    function drawSign(w, h) {
+      gradientTitle('📌 每日签到', w / 2, h * 0.10, 34);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      // 显示当前连签进度与奖励表
+      ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`已连续签到 ${save.sign.streak} 天（共 ${save.sign.total} 天）`, w / 2, h * 0.20);
+      const streak = save.sign.streak;
+      for (let i = 0; i < SIGN_REWARDS.length; i++) {
+        const r = SIGN_REWARDS[i];
+        const active = (i + 1) === streak;
+        const y = h * 0.28 + i * 38;
+        ctx.fillStyle = active ? '#ffd24a' : 'rgba(255,255,255,0.7)';
+        ctx.font = active ? 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif' : '15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillText(`${r.icon} ${r.label}${active ? ' ← 今天' : ''}`, w / 2, y);
+      }
+    }
+
+    /* ---------- 宝箱界面 ---------- */
+    function drawChests(w, h) {
+      gradientTitle('📦 宝箱仓库', w / 2, h * 0.10, 34);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (save.chests.length === 0) {
+        ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.fillText('还没有宝箱，通关关卡后会自动产生', w / 2, h * 0.35);
+        return;
+      }
+      for (let i = 0; i < save.chests.length; i++) {
+        const c = save.chests[i];
+        const def = CHESTS[c.t];
+        const ready = chestReady(c);
+        const left = chestLeftSec(c);
+        const y = h * 0.22 + i * 70;
+        // 宝箱卡片
+        ctx.fillStyle = ready ? 'rgba(107,182,80,0.2)' : 'rgba(100,100,120,0.2)';
+        roundRect(w / 2 - 120, y, 240, 56, 14); ctx.fill();
+        ctx.strokeStyle = ready ? '#6bb650' : '#646478';
+        ctx.lineWidth = 2;
+        roundRect(w / 2 - 120, y, 240, 56, 14); ctx.stroke();
+        ctx.font = '28px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(def.icon, w / 2 - 80, y + 28);
+        ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(def.name, w / 2 + 20, y + 20);
+        ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = ready ? '#6bb650' : 'rgba(255,255,255,0.6)';
+        ctx.fillText(ready ? '可以开启！' : `还需要 ${left} 秒`, w / 2 + 20, y + 42);
+      }
+    }
+
+    /* ---------- 任务界面 ---------- */
+    function drawQuests(w, h) {
+      gradientTitle('📋 每日任务', w / 2, h * 0.10, 34);
+      ensureQuests();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const pending = questsPending();
+      if (pending > 0) {
+        ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#ffd24a';
+        ctx.fillText(`有 ${pending} 个任务待领取！`, w / 2, h * 0.17);
+      }
+      for (let i = 0; i < QUEST_DEFS.length; i++) {
+        const q = QUEST_DEFS[i];
+        const prog = questProgress(q);
+        const done = questDone(q);
+        const claimed = questClaimed(q);
+        const it = ITEM_BY_ID[q.rewardItem];
+        const y = h * 0.25 + i * 65;
+        ctx.fillStyle = claimed ? 'rgba(107,182,80,0.15)' : (done ? 'rgba(255,210,74,0.15)' : 'rgba(100,100,120,0.1)');
+        roundRect(w / 2 - 120, y, 240, 52, 12); ctx.fill();
+        ctx.strokeStyle = claimed ? '#6bb650' : (done ? '#ffd24a' : '#646478');
+        ctx.lineWidth = claimed || done ? 2 : 1;
+        roundRect(w / 2 - 120, y, 240, 52, 12); ctx.stroke();
+        ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${q.name}  ${prog}/${q.need}`, w / 2 - 100, y + 18);
+        ctx.fillStyle = it ? RARITY_COLOR[it.rarity] : '#ffd24a';
+        ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillText('奖励：' + (it ? it.icon + ' ' + it.name : q.rewardItem), w / 2 - 100, y + 38);
+        if (claimed) {
+          ctx.fillStyle = '#6bb650';
+          ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText('✅ 已领', w / 2 + 100, y + 28);
+        }
+      }
+    }
+
+    /* ---------- 免费道具界面 ---------- */
+    function drawFreeItem(w, h) {
+      gradientTitle('🎁 免费道具', w / 2, h * 0.10, 34);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const left = freeItemLeftMs();
+      ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = left > 0 ? 'rgba(255,255,255,0.6)' : '#6bb650';
+      ctx.fillText(left > 0 ? `冷却中：${Math.ceil(left / 60000)} 分钟后可再领` : '随时可以领一件稀有道具！', w / 2, h * 0.22);
+      ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText('看广告即可领取，保底稀有度以上', w / 2, h * 0.28);
+    }
+
     function drawOverlayButtons() {
       overlayLayout();
       for (const b of overlayButtons) {
@@ -2733,7 +3412,7 @@
     }
 
     /* 按下即触发的覆盖层按钮（覆盖层状态下点击响应） */
-    const TAP_ACTIONS = { pause: 1, resume: 1, restart: 1, retry: 1, home: 1, revive: 1, double: 1, next: 1, music: 1, sound: 1, room: 1, keepgoing: 1, tv: 1, eat: 1, sleep: 1, wearHat: 1, wearGlass: 1, wearNeck: 1, scores: 1, achievements: 1, daily: 1, dailyStart: 1, back: 1 };
+    const TAP_ACTIONS = { pause: 1, resume: 1, restart: 1, retry: 1, home: 1, revive: 1, double: 1, next: 1, music: 1, sound: 1, room: 1, keepgoing: 1, tv: 1, eat: 1, sleep: 1, wearHat: 1, wearGlass: 1, wearNeck: 1, scores: 1, achievements: 1, daily: 1, dailyStart: 1, back: 1, bag: 1, sign: 1, chest: 1, quest: 1, share: 1 };
 
     function onPointerDown(x, y, id) {
       const b = hitButtons(x, y);
@@ -2803,13 +3482,26 @@
         startRun();
         return;
       }
+      if (id.indexOf('item:') === 0) {
+        // 背包：点一下携带，再点一下取消。下一关开局生效并消耗 1 个。
+        const iid = id.slice(5);
+        const it = ITEM_BY_ID[iid];
+        if (!it) return;
+        if (bagCount(iid) <= 0) { toast('还没有「' + it.name + '」，通关就会掉落～'); return; }
+        save.equipped = (save.equipped === iid) ? '' : iid;
+        persist();
+        sfx.play(save.equipped ? 'item' : 'click');
+        toast(save.equipped ? ('下一关携带：' + it.icon + ' ' + it.name) : '已取消携带');
+        return;
+      }
       switch (id) {
+        case 'bag': state = 'bag'; sfx.play('click'); break;
         case 'pause':
           if (state === 'playing') { state = 'paused'; stopBgm(); sfx.play('click'); }
           break;
         case 'resume': state = 'playing'; startBgm(); break;
         case 'restart': generateLevel(level); state = 'playing'; break;
-        case 'retry': generateLevel(level); revivesUsed = 0; runGifts = 0; state = 'playing'; break;
+        case 'retry': refreshItemEffects(); generateLevel(level); revivesUsed = 0; runGifts = 0; state = 'playing'; break;
         case 'home':
           state = 'cover'; runGifts = 0; revivesUsed = 0;
           petAction = ''; pendingUnlock = null; stopBgm();
@@ -2817,12 +3509,20 @@
           break;
         case 'scores': state = 'scores'; sfx.play('click'); break;
         case 'achievements': state = 'achievements'; sfx.play('click'); break;
-        case 'daily': state = 'daily'; sfx.play('click'); break;
+      case 'daily': state = 'daily'; sfx.play('click'); break;
         case 'dailyStart': enterDaily(); break;
+        case 'sign':
+          state = 'sign'; sfx.play('click'); break;
+        case 'chest':
+          state = 'chest'; sfx.play('click'); break;
+        case 'quest':
+          state = 'quest'; sfx.play('click'); break;
+        case 'freeItem':
+          state = 'freeItem'; sfx.play('click'); break;
         case 'back': state = 'cover'; sfx.play('click'); dailyMode = false; rng = Math.random; break;
         case 'revive': reviveByAd(); break;
         case 'double': doubleRewardByAd(); break;
-        case 'next': level++; runGifts = 0; revivesUsed = 0; refreshRevives(); pendingUnlock = null; generateLevel(level); state = 'playing'; break;
+        case 'next': level++; runGifts = 0; revivesUsed = 0; refreshRevives(); pendingUnlock = null; prepareRunItem(); generateLevel(level); state = 'playing'; break;
         case 'room':
           // 意见②：大房子建成后回小屋休息
           state = 'room'; petAction = ''; stopBgm(); sfx.play('rev');
@@ -2830,7 +3530,7 @@
         case 'keepgoing':
           // 意见②：休息完继续闯关
           level++; runGifts = 0; revivesUsed = 0; pendingUnlock = null;
-          generateLevel(level); state = 'playing';
+          prepareRunItem(); generateLevel(level); state = 'playing';
           break;
         case 'tv': case 'eat': case 'sleep': {
           // 意见②：小屋里点什么，宠物就干什么
@@ -2894,7 +3594,7 @@
       else if (code === 'Enter') {
         if (state === 'cover') startRun();
         else if (state === 'dead') { generateLevel(level); revivesUsed = 0; runGifts = 0; state = 'playing'; }
-        else if (state === 'cleared') { level++; runGifts = 0; revivesUsed = 0; generateLevel(level); state = 'playing'; }
+        else if (state === 'cleared') { level++; runGifts = 0; revivesUsed = 0; prepareRunItem(); generateLevel(level); state = 'playing'; }
       }
     }
     function onKeyUp(code) {
@@ -2915,6 +3615,11 @@
       petAction = '';
       dailyMode = false;           // 正常模式：真随机
       rng = Math.random;
+      // 重置任务进度追踪
+      questRuns = 0;
+      questGiftCount = 0;
+      if (!save.questRuns) save.questRuns = 0;
+      prepareRunItem();            // 道具：消耗背包 1 件并注入本关效果
       generateLevel(level);
       state = 'playing';
       sfx.play('click');
@@ -2934,6 +3639,8 @@
       level = 1;
       runGifts = 0; revivesUsed = 0; runClean = true;
       pendingUnlock = null; petAction = '';
+      // 每日挑战禁用道具：全球同关冲分，带道具会直接破坏排行榜公平性
+      shieldLeft = 0; magnetLeft = 0; boostLeft = 0; equippedItem = '';
       generateLevel(1);            // 今天所有人同一关（seed 决定）
       state = 'playing';
       sfx.play('click');
@@ -3030,16 +3737,34 @@
         if (!AC) return null;
         ac = new AC();
         master = ac.createGain();
-        master.gain.value = 0.26;
+        master.gain.value = 0.40;   // 旧值 0.26：BGM 乘以 0.062 后几乎听不见
         master.connect(ac.destination);
       } catch (e) { ac = null; }
       return ac;
     }
 
-    function tone(f0, f1, dur, type, vol, delay) {
+    /* ---------- 音色引擎：全部走 WebAudio，零音频文件 ----------
+     * 两层 API：
+     *   - xxxAt(..., when) 接受绝对 AudioContext 时间，供 BGM 调度器精确排程；
+     *   - tone/noise(..., delay) 相对时间，供音效即时播放（保持原有调用签名）。
+     * rationale：BGM 必须提前排程（lookahead），否则 JS 卡顿或手机后台节流会让节奏
+     * 抖动、断拍；音效是即时触发，用相对 delay 即可。 */
+    let noiseBuf = null;
+    function getNoiseBuf() {
+      const c = ensure();
+      if (!c) return null;
+      if (noiseBuf) return noiseBuf;
+      const len = Math.floor(c.sampleRate * 0.5);
+      noiseBuf = c.createBuffer(1, len, c.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      return noiseBuf;
+    }
+
+    function toneAt(f0, f1, dur, type, vol, when) {
       const c = ensure();
       if (!c || muted) return;
-      const t0 = c.currentTime + (delay || 0);
+      const t0 = when == null ? c.currentTime : when;
       const osc = c.createOscillator();
       const g = c.createGain();
       osc.type = type || 'sine';
@@ -3051,23 +3776,98 @@
       osc.connect(g); g.connect(master);
       osc.start(t0); osc.stop(t0 + dur + 0.03);
     }
+    function tone(f0, f1, dur, type, vol, delay) {
+      const c = ensure();
+      if (!c) return;
+      toneAt(f0, f1, dur, type, vol, delay ? c.currentTime + delay : null);
+    }
 
-    function noise(dur, vol, delay) {
+    function noiseAt(dur, vol, when, filterType, freq) {
       const c = ensure();
       if (!c || muted) return;
-      const t0 = c.currentTime + (delay || 0);
-      const len = Math.floor(c.sampleRate * dur);
-      const buf = c.createBuffer(1, len, c.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      const t0 = when == null ? c.currentTime : when;
       const src = c.createBufferSource();
-      src.buffer = buf;
+      src.buffer = getNoiseBuf();
+      if (!src.buffer) return;
+      const bp = c.createBiquadFilter();
+      bp.type = filterType || 'lowpass';
+      bp.frequency.value = freq || 1400;
       const g = c.createGain();
-      g.gain.value = vol == null ? 0.3 : vol;
+      g.gain.setValueAtTime(vol == null ? 0.3 : vol, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(bp); bp.connect(g); g.connect(master);
+      src.start(t0); src.stop(t0 + dur + 0.02);
+    }
+    function noise(dur, vol, delay) {
+      const c = ensure();
+      if (!c) return;
+      noiseAt(dur, vol, delay ? c.currentTime + delay : null);
+    }
+
+    // 底鼓：正弦下扫 + 快速衰减
+    function kickAt(when, vol) {
+      const c = ensure();
+      if (!c || muted) return;
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(155, when);
+      o.frequency.exponentialRampToValueAtTime(46, when + 0.1);
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(vol, when + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.24);
+      o.connect(g); g.connect(master);
+      o.start(when); o.stop(when + 0.28);
+    }
+    // 军鼓：带通白噪 + 一点音高体
+    function snareAt(when, vol) {
+      const c = ensure();
+      if (!c || muted) return;
+      noiseAt(0.15, vol, when, 'bandpass', 1900);
+      toneAt(196, 130, 0.08, 'triangle', vol * 0.5, when);
+    }
+    // 踩镲：高通白噪，极短
+    function hatAt(when, vol) {
+      noiseAt(0.045, vol, when, 'highpass', 7600);
+    }
+    // 和弦垫：锯齿 + 失谐 + 低通，铺底不抢旋律
+    function padAt(freqs, dur, vol, when) {
+      const c = ensure();
+      if (!c || muted) return;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(vol, when + dur * 0.3);
+      g.gain.linearRampToValueAtTime(0.0001, when + dur);
       const lp = c.createBiquadFilter();
-      lp.type = 'lowpass'; lp.frequency.value = 1400;
-      src.connect(lp); lp.connect(g); g.connect(master);
-      src.start(t0);
+      lp.type = 'lowpass'; lp.frequency.value = 1250;
+      g.connect(lp); lp.connect(master);
+      for (let i = 0; i < freqs.length; i++) {
+        for (let j = 0; j < 2; j++) {
+          const o = c.createOscillator();
+          o.type = 'sawtooth';
+          o.frequency.value = freqs[i];
+          o.detune.value = j === 0 ? -7 : 7;
+          o.connect(g);
+          o.start(when); o.stop(when + dur + 0.05);
+        }
+      }
+    }
+    // 主旋律：双振荡器轻微失谐，比单振荡器厚实、更"像音乐"
+    function leadAt(f, dur, wave, vol, when) {
+      const c = ensure();
+      if (!c || muted) return;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(vol, when + 0.018);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+      g.connect(master);
+      for (let j = 0; j < 2; j++) {
+        const o = c.createOscillator();
+        o.type = wave;
+        o.frequency.value = f;
+        o.detune.value = j === 0 ? 0 : -9;
+        o.connect(g);
+        o.start(when); o.stop(when + dur + 0.02);
+      }
     }
 
     const SFX = {
@@ -3080,63 +3880,125 @@
       fail:  function () { [392, 330, 262].forEach(function (f, i) { tone(f, f, 0.22, 'triangle', 0.32, i * 0.14); }); },
       click: function () { tone(660, 660, 0.05, 'square', 0.22); },
       rev:   function () { [523, 784, 1047].forEach(function (f, i) { tone(f, f, 0.14, 'sine', 0.34, i * 0.07); }); },
+      // —— 新增：道具 / 开箱 / 签到 / 段位（留存系统反馈音） ——
+      item:  function () { [659, 880, 1175].forEach(function (f, i) { tone(f, f, 0.10, 'triangle', 0.30, i * 0.05); }); },
+      open:  function () { tone(392, 784, 0.30, 'sawtooth', 0.20); [1047, 1319].forEach(function (f, i) { tone(f, f, 0.16, 'triangle', 0.26, 0.18 + i * 0.07); }); },
+      sign:  function () { [523, 659, 784, 1047, 1319].forEach(function (f, i) { tone(f, f, 0.13, 'square', 0.24, i * 0.055); }); },
+      rank:  function () { [440, 554, 659, 880].forEach(function (f, i) { tone(f, f, 0.20, 'sawtooth', 0.24, i * 0.08); }); },
+      quest: function () { [784, 988, 1319].forEach(function (f, i) { tone(f, f, 0.12, 'square', 0.26, i * 0.06); }); },
+      shield:function () { tone(300, 900, 0.22, 'sine', 0.28); noise(0.10, 0.10); },
     };
 
-    /* ---------- BGM（意见③）：程序化音序器，6 大主题 6 首循环曲 ----------
-     * 零音频文件：旋律/低音用 MIDI 音号表驱动 tone()，16 步一小节循环。
-     * rationale：音量压在 0.05-0.10（不盖过音效），快歌加轻 hat 打点，
-     * 调式/速度跟主题情绪走（草原欢快大调、火山紧张小调、霓虹电子琶音）。 */
+    /* ---------- BGM：6 大主题 6 首循环曲（旋律 + 贝斯 + 和弦垫 + 鼓组） ----------
+     * 相比旧版（setInterval 单步触发、只有单音旋律+贝斯）的三处关键升级：
+     * 1. lookahead 调度器：每 25ms 巡检、提前 150ms 把音符排进 AudioContext 时间轴，
+     *    节奏由音频时钟决定 —— JS 卡顿 / 手机后台节流都不会让 BGM 走音或断拍。
+     * 2. 四层编曲：lead（双振荡器失谐）+ bass + pad（和弦垫）+ drums（底鼓/军鼓/踩镲）。
+     *    旧版只有单音旋律，听感单薄 —— 这是"背景音乐不像音乐"的根因。
+     * 3. 音量：旧版 lead 0.062 × master 0.26 ≈ 0.016，基本听不见（用户反馈"没有 BGM"）；
+     *    新版 lead 0.13 × master 0.40 ≈ 0.052，和弦垫与鼓组再补足存在感。 */
     const midi = function (n) { return 440 * Math.pow(2, (n - 69) / 12); };
+    // mel 32 步（两小节 16 分音符）；chords 每 8 步换一个；drums 为 16 步 0/1 串
     const SONGS = [
-      { bpm: 132, wave: 'triangle', bassWave: 'sine', hat: false,   // 0 翠绿草原：C 大调五声，明亮跳跃
-        mel: [60, 64, 67, 69, 72, 69, 67, 64, 60, 64, 67, 72, null, 67, 64, 62],
-        bass: [48, 55, 52, 55] },
-      { bpm: 112, wave: 'sawtooth', bassWave: 'sine', hat: false,   // 1 金黄沙漠：phrygian 异域风
-        mel: [62, 63, 65, 67, 69, 67, 65, 63, 62, 65, 69, 65, 63, 62, null, null],
-        bass: [50, 57, 53, 57] },
-      { bpm: 96,  wave: 'sine',     bassWave: 'sine', hat: false,   // 2 冰雪世界：A 小调慢摇
-        mel: [69, null, 72, null, 71, 69, 67, 69, 64, null, 67, null, 69, 67, 64, 62],
-        bass: [45, 52, 48, 52] },
-      { bpm: 148, wave: 'square',   bassWave: 'triangle', hat: true, // 3 糖果王国：F 大调高速跳音
-        mel: [65, 69, 65, 70, 69, 65, 72, 69, 65, 69, 65, 70, 74, 72, 70, 69],
-        bass: [41, 48, 45, 48] },
-      { bpm: 156, wave: 'sawtooth', bassWave: 'sawtooth', hat: true, // 4 火山地带：E 小调紧张
-        mel: [52, 55, 59, 55, 52, 55, 59, 62, 52, 55, 59, 55, 63, 62, 59, 55],
-        bass: [40, 47, 43, 47] },
-      { bpm: 126, wave: 'square',   bassWave: 'triangle', hat: true, // 5 霓虹都市：Am 电子琶音
-        mel: [57, 60, 64, 67, 64, 60, 57, 60, 64, 67, 72, 67, 64, 60, 64, 60],
-        bass: [45, 52, 48, 52] },
+      { name: '翠绿草原', bpm: 128, wave: 'triangle', bassWave: 'triangle',  // 0 C 大调，明亮跳跃
+        mel: [72, 76, 79, 76, 72, null, 74, 76, 77, 76, 74, 72, null, 72, 74, 76,
+              79, 81, 79, 76, 74, 72, 74, 76, 77, 79, 76, 74, 72, null, null, null],
+        bass: [48, 45, 41, 43],
+        chords: [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]],
+        drums: { kick: '1000001010000000', snare: '0000100000001000', hat: '0010010010010010' } },
+      { name: '金黄沙漠', bpm: 108, wave: 'square', bassWave: 'triangle',    // 1 D phrygian，异域手鼓
+        mel: [62, 63, 65, 67, 69, 67, 65, 63, 62, null, 62, 63, 65, 63, 62, null,
+              67, 69, 70, 69, 67, 65, 63, 62, 63, 62, 61, 62, null, null, null, null],
+        bass: [38, 46, 36, 38],
+        chords: [[50, 53, 57], [46, 50, 53], [48, 52, 55], [50, 53, 57]],
+        drums: { kick: '1001001001001000', snare: '0000100000001001', hat: '0101010101010101' } },
+      { name: '冰雪世界', bpm: 92, wave: 'sine', bassWave: 'sine',           // 2 A 小调，空灵慢摇
+        mel: [69, null, 72, null, 71, 69, 67, 69, 64, null, 67, null, 69, 67, 64, 62,
+              64, 67, 69, 72, 71, 69, 67, null, 64, 62, 60, 62, 64, null, null, null],
+        bass: [45, 41, 36, 43],
+        chords: [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]],
+        drums: { kick: '1000000010000000', snare: '0000000000001000', hat: '0001000100010001' } },
+      { name: '糖果王国', bpm: 150, wave: 'square', bassWave: 'triangle',    // 3 F 大调，高速跳音
+        mel: [65, 69, 65, 70, 69, 65, 72, 69, 65, 69, 65, 70, 74, 72, 70, 69,
+              77, 74, 72, 69, 70, 69, 65, null, 69, 72, 77, 74, 72, null, null, null],
+        bass: [41, 38, 34, 36],
+        chords: [[53, 57, 60], [50, 53, 57], [46, 50, 53], [48, 52, 55]],
+        drums: { kick: '1000100010001000', snare: '0000100000001000', hat: '0101010101010101' } },
+      { name: '火山地带', bpm: 152, wave: 'sawtooth', bassWave: 'sawtooth',  // 4 E 小调，紧张重拍
+        mel: [52, 55, 59, 55, 52, 55, 59, 62, 64, 62, 59, 55, 52, null, 55, 59,
+              64, 67, 64, 62, 59, 55, 52, null, 55, 59, 62, 64, 59, null, null, null],
+        bass: [40, 36, 43, 38],
+        chords: [[52, 55, 59], [48, 52, 55], [55, 59, 62], [50, 54, 57]],
+        drums: { kick: '1010001010010010', snare: '0000100000001001', hat: '1111111111111111' } },
+      { name: '霓虹都市', bpm: 126, wave: 'square', bassWave: 'triangle',    // 5 Am 电子琶音
+        mel: [57, 60, 64, 67, 64, 60, 57, 60, 64, 67, 72, 67, 64, 60, 64, 60,
+              55, 59, 62, 67, 62, 59, 55, 59, 62, 67, 71, 67, 62, 59, 55, null],
+        bass: [45, 41, 43, 40],
+        chords: [[57, 60, 64], [53, 57, 60], [55, 59, 62], [52, 55, 59]],
+        drums: { kick: '1000100010001000', snare: '0000100000001000', hat: '0010010010010010' } },
     ];
-    let bgmTimer = null, bgmStep = 0, bgmSong = null, bgmWanted = -1;
+
+    let bgmTimer = null, bgmSong = null, bgmIdx = -1, bgmActive = false;
+    let stepIdx = 0, nextTime = 0;
+    const LOOKAHEAD = 0.15, TICK_MS = 25;
+
+    function stepDur() { return 60 / bgmSong.bpm / 4; }
+
+    function scheduleStep(i, when) {
+      const s = bgmSong, L = s.mel.length, k = i % L, k16 = i % 16;
+      const m = s.mel[k];
+      if (m != null) leadAt(midi(m), stepDur() * 1.75, s.wave, 0.13, when);
+      if (k % 4 === 0) {
+        const b = s.bass[(k / 4 | 0) % s.bass.length];
+        toneAt(midi(b), midi(b), stepDur() * 3.5, s.bassWave, 0.17, when);
+      }
+      if (k % 8 === 0) {
+        const ch = s.chords[(k / 8 | 0) % s.chords.length];
+        const fr = [];
+        for (let n = 0; n < ch.length; n++) fr.push(midi(ch[n]));
+        padAt(fr, stepDur() * 7.4, 0.05, when);
+      }
+      const d = s.drums;
+      if (d) {
+        if (d.kick.charAt(k16) === '1') kickAt(when, 0.40);
+        if (d.snare.charAt(k16) === '1') snareAt(when, 0.13);
+        if (d.hat.charAt(k16) === '1') hatAt(when, 0.042);
+      }
+    }
+
+    function scheduler() {
+      const c = ac;
+      if (!c || !bgmSong) return;
+      const sd = stepDur();
+      let guard = 0;
+      while (nextTime < c.currentTime + LOOKAHEAD && guard++ < 64) {
+        scheduleStep(stepIdx, Math.max(nextTime, c.currentTime + 0.01));
+        stepIdx++;
+        nextTime += sd;
+      }
+      // 页面被挂起再回来时时间轴会落后，追平以免一次性补发大量音符
+      if (nextTime < c.currentTime) nextTime = c.currentTime + 0.02;
+    }
 
     function stopBgmTimer() {
       if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = null; }
     }
-    function bgmTick() {
-      const s = bgmSong;
-      if (!s) return;
-      const stepMs = 60000 / s.bpm / 4;             // 16 分音符
-      const i = bgmStep % 16;
-      const m = s.mel[i];
-      if (m != null) tone(midi(m), midi(m), stepMs / 1000 * 0.92, s.wave, 0.062);
-      if (i % 4 === 0) {
-        const b = s.bass[(bgmStep / 4 | 0) % 4];
-        tone(midi(b), midi(b), stepMs / 1000 * 3.4, s.bassWave, 0.085);
-      }
-      if (s.hat && i % 2 === 1) noise(0.03, 0.045);
-      bgmStep++;
-    }
     function startBgm(idx) {
-      bgmWanted = (typeof idx === 'number') ? idx : bgmWanted;
+      if (typeof idx === 'number') bgmIdx = idx;
+      if (bgmIdx < 0) return;
       stopBgmTimer();
-      if (muted || bgmWanted < 0) return;
-      bgmSong = SONGS[bgmWanted % SONGS.length];
-      bgmStep = 0;
-      bgmTick();
-      bgmTimer = setInterval(bgmTick, 60000 / bgmSong.bpm / 4);
+      bgmSong = SONGS[bgmIdx % SONGS.length];
+      bgmActive = true;
+      const c = ensure();
+      if (!c || muted) return;
+      if (c.state === 'suspended') c.resume();
+      stepIdx = 0;
+      nextTime = c.currentTime + 0.08;
+      scheduler();
+      bgmTimer = setInterval(scheduler, TICK_MS);
     }
     function stopBgm() {
-      bgmWanted = -1;
+      bgmActive = false;
       stopBgmTimer();
       bgmSong = null;
     }
@@ -3154,10 +4016,11 @@
       stopBgm: stopBgm,
       setMuted: function (v) {
         muted = !!v;
-        if (master) master.gain.value = muted ? 0 : 0.26;
+        if (master) master.gain.value = muted ? 0 : 0.40;
         try { global.localStorage.setItem('petadv.muted', muted ? '1' : '0'); } catch (e) {}
-        if (muted) stopBgm();
-        else if (bgmWanted >= 0) startBgm(bgmWanted);
+        // 静音只停调度器，保留 bgmActive：取消静音后能自动接着放
+        if (muted) stopBgmTimer();
+        else if (bgmActive) startBgm();
       },
       isMuted: function () { return muted; },
     };
