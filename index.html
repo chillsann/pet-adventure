@@ -155,6 +155,39 @@
   const RARITY_NAME  = [null, '普通',    '稀有',    '史诗'];
 
   /* ===========================================================================
+   * 改装零件系统（借鉴《合成竞速之王》的核心循环）
+   *
+   * 那个游戏最值得抄的一点不是赛车，而是它把「产出 → 购买 → 合成 → 变强」这条
+   * 循环做得极短：点屏幕出金币 → 金币买零件 → 两个同级零件合成高一级 → 车更强
+   * → 出金币更快。每一步都在 3 秒内看到结果，玩家永远有"下一步该干什么"。
+   *
+   * 我们把这套循环嫁接在既有的跑酷玩法上（跑酷 + 元成长，是超休闲的标准结构）：
+   *   跑关 → 得金币 → 买零件 → 合成升级 → 载具更快/跳更高 → 跑关更轻松 → 更多金币
+   *
+   * 5 个部位各自对应一个手感维度，合成不花钱、只花零件 —— 让"合成"成为纯粹的
+   * 正反馈时刻，而不是又一次付费；金币的消耗口统一收敛到「买 1 级零件」这一处，
+   * 经济模型简单到不会失控。
+   * ======================================================================== */
+  const PART_SLOTS = [
+    { id: 'engine',     name: '发动机', icon: '⚙️', stat: 'vmax',  per:  0.055, tint: '#ff9f43', desc: '最高速度' },
+    { id: 'tires',      name: '轮胎',   icon: '🛞', stat: 'accel', per:  0.070, tint: '#54a0ff', desc: '起步加速' },
+    { id: 'suspension', name: '悬挂',   icon: '🪃', stat: 'jump',  per:  0.045, tint: '#7bd88f', desc: '跳跃高度' },
+    { id: 'chassis',    name: '车架',   icon: '🛡️', stat: 'brake', per: -0.012, tint: '#c8d6e5', desc: '落地操控' },
+    { id: 'nitro',      name: '氮气',   icon: '🔥', stat: 'coin',  per:  0.15,  tint: '#ff6b81', desc: '金币加成' },
+  ];
+  const PART_MAX_LV = 6;        // 每部位最高 6 级
+  const PART_PRICE  = 120;      // 买 1 个「1 级零件」的价格（唯一金币消耗口）
+  /* 离线产出定价：按「小时」而不是「秒」定义。
+   * 平衡依据：一次通关约赚 200+ 金币，离线 8 小时给 960（≈5 次通关）——
+   * 是"回来的理由"，但远不足以取代主动游玩（否则挂机就赢了，游戏就死了）。
+   * 按小时定义是为了让界面上的数字好看好懂（"每小时 120"），不用暴露每秒的碎数。 */
+  const IDLE_PER_HOUR = 120;
+  const IDLE_CAP_SEC = 8 * 3600;// 离线收益最多累计 8 小时
+  const PART_BY_ID = {};
+  for (const s of PART_SLOTS) PART_BY_ID[s.id] = s;
+  const PART_LV_NAME = [null, 'Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ'];
+
+  /* ===========================================================================
    * 留存与变现钩子（成人也要爱玩 + 广告位设计）
    * 四条钩子各自解决一个留存问题：
    * ① 每日签到 —— 解决"明天为什么还要打开"（连续签到奖励递增，断签重置）
@@ -296,6 +329,19 @@
     if (!save.quests || typeof save.quests !== 'object') save.quests = { date: '', prog: {}, claimed: {} };
     if (!save.totalScore) save.totalScore = 0;
     if (!save.freeItemAt) save.freeItemAt = 0;
+    // 改装系统：coins 金币 / parts 各部位各级零件数量 / idleAt 离线收益计时起点
+    // parts 结构：{ engine: [lv1数, lv2数, ..., lv6数], tires: [...], ... }
+    if (typeof save.coins !== 'number') save.coins = 0;
+    if (!save.parts || typeof save.parts !== 'object') save.parts = {};
+    for (const s of PART_SLOTS) {
+      if (!Array.isArray(save.parts[s.id]) || save.parts[s.id].length !== PART_MAX_LV) {
+        const old = save.parts[s.id];
+        save.parts[s.id] = [0, 0, 0, 0, 0, 0];
+        // 旧档迁移：若曾存过单值，按"持有 1 级零件 n 个"理解，不丢资产
+        if (typeof old === 'number') save.parts[s.id][0] = old | 0;
+      }
+    }
+    if (typeof save.idleAt !== 'number' || save.idleAt <= 0) save.idleAt = Date.now();
     function persist() { storage.set(SKEY, save); }
 
     /* ---------- 道具掉落与背包 ---------- */
@@ -328,6 +374,102 @@
       if (save.bag[equippedItem] <= 0) delete save.bag[equippedItem];
       persist();
       return true;
+    }
+
+    /* ---------- 改装零件 / 金币 / 离线收益 ---------- */
+    /* 零件按「拥有该部位的最高等级」生效 —— 直觉就是"我车上装的是最好的那个"。
+     * 低等级零件不会白费：它们是合成高等级零件的材料（2 个同级 → 1 个高一级）。 */
+    function partCount(slot, lv) { const a = save.parts[slot]; return a ? (a[lv - 1] | 0) : 0; }
+    function partBestLv(slot) {
+      const a = save.parts[slot]; if (!a) return 0;
+      for (let lv = PART_MAX_LV; lv >= 1; lv--) if ((a[lv - 1] | 0) > 0) return lv;
+      return 0;
+    }
+    function partOwned(slot) {
+      const a = save.parts[slot]; if (!a) return 0;
+      let n = 0; for (let i = 0; i < PART_MAX_LV; i++) n += a[i] | 0;
+      return n;
+    }
+    /* 车库总强度 = 5 个部位最高等级之和（0 ~ 30）。封面用它做「我的车多强」的一眼指标 */
+    function garagePower() { let n = 0; for (const s of PART_SLOTS) n += partBestLv(s.id); return n; }
+    function partBonus() {
+      const b = { vmax: 1, accel: 1, jump: 1, brakeAdd: 0, coin: 1 };
+      for (const s of PART_SLOTS) {
+        const lv = partBestLv(s.id); if (!lv) continue;
+        /* 用 lv 而不是 lv-1 作为倍数：1 级零件也立刻有收益。
+         * 让第一次花钱就看到数字变好，是这条循环能不能转起来的关键 ——
+         * 如果 1 级是 +0%，玩家买完第一件零件只会觉得"白买了"。 */
+        if (s.stat === 'vmax') b.vmax += s.per * lv;
+        else if (s.stat === 'accel') b.accel += s.per * lv;
+        else if (s.stat === 'jump') b.jump += s.per * lv;
+        else if (s.stat === 'brake') b.brakeAdd += s.per * lv;
+        else if (s.stat === 'coin') b.coin += s.per * lv;
+      }
+      return b;
+    }
+    function addCoins(n) { save.coins = Math.max(0, (save.coins | 0) + Math.round(n || 0)); persist(); }
+    function buyPart(slot) {
+      if (!PART_BY_ID[slot]) return false;
+      if ((save.coins | 0) < PART_PRICE) return false;
+      save.coins -= PART_PRICE;
+      save.parts[slot][0] = (save.parts[slot][0] | 0) + 1;
+      persist();
+      return true;
+    }
+    function canMerge(slot, lv) { return lv < PART_MAX_LV && partCount(slot, lv) >= 2; }
+    function mergeOne(slot, lv) {
+      if (!canMerge(slot, lv)) return false;
+      save.parts[slot][lv - 1] -= 2;
+      save.parts[slot][lv] = (save.parts[slot][lv] | 0) + 1;
+      persist();
+      return true;
+    }
+    /* 一键合成：从低级往高级逐级合并，一轮清空所有可合成项。
+     * 为什么值得做成一键：合成是这个游戏最爽的正反馈时刻，让它零摩擦 ——
+     * 玩家点一下听见一串"合成音"，比让他点 20 次体验好得多。 */
+    function mergeAll() {
+      let n = 0;
+      for (const s of PART_SLOTS) {
+        for (let lv = 1; lv < PART_MAX_LV; lv++) {
+          while (canMerge(s.id, lv)) { mergeOne(s.id, lv); n++; }
+        }
+      }
+      return n;
+    }
+    function mergeableCount() {
+      let n = 0;
+      for (const s of PART_SLOTS) for (let lv = 1; lv < PART_MAX_LV; lv++) if (canMerge(s.id, lv)) n++;
+      return n;
+    }
+    /* 待收离线收益：累计时长（封顶 8 小时）× 每秒产出 × 氮气金币加成 */
+    function idlePending() {
+      const raw = Math.max(0, (Date.now() - (save.idleAt || Date.now())) / 1000);
+      const sec = Math.min(IDLE_CAP_SEC, raw);
+      return {
+        sec: sec,
+        capped: raw >= IDLE_CAP_SEC,
+        coins: Math.floor(sec / 3600 * IDLE_PER_HOUR * partBonus().coin),
+      };
+    }
+    /* 把"最后活跃时间"推到现在。
+     * 为什么需要它：离线收益必须只在"玩家不在玩"的时候累计，否则一边玩一边挂机
+     * 就是双重收益（通关已经给金币了）。游戏进行中每隔十几秒刷一次 idleAt，
+     * 那么玩家关掉页面时 idleAt 就约等于最后活跃时刻，待收时长自然等于离线时长。
+     * 带节流是因为 step() 是 60Hz 调用的，不节流会把 localStorage 写爆。 */
+    let idleTouchAt = 0;
+    function touchIdle(force) {
+      const now = Date.now();
+      if (!force && now - idleTouchAt < 15000) return;
+      idleTouchAt = now;
+      save.idleAt = now;
+      persist();
+    }
+    function collectIdle(mult) {
+      const p = idlePending();
+      const got = Math.floor(p.coins * (mult || 1));
+      save.idleAt = Date.now();
+      addCoins(got);
+      return got;
     }
 
     /* =========================================================================
@@ -472,6 +614,8 @@
     let comboCount = 0;    // 连续无伤吃星
     let runClean = true;   // 意见②：本关是否一次都没受伤（完美通关攒房子）
     let runScore = 0;      // 本关得分（评分系统）
+    let runCoins = 0;      // 本关结算获得的金币（结算界面展示 + 翻倍用）
+    let runCoinsDoubled = false; // 本关金币是否已翻倍（防止重复刷同一个广告位）
     let runCombo = 0;      // 本关最大连击
     let runGrade = null;   // 本关评级 { g, color, label }（过关结算后写入）
     let dailyMode = false; // 每日挑战模式：用日期 seed 固定关卡
@@ -557,6 +701,21 @@
             accel: itEq.accel, brake: itEq.brake, accent: itEq.accent, fromItem: true }
         : baseVehicle;
 
+      /* 改装零件加成：叠在载具基础数值之上。
+       * 必须克隆成新对象 —— vehicle 可能直接引用 VEHICLES 表里的元素，原地修改会
+       * 永久污染载具表，导致数值每关越叠越高（这是个很难查的隐蔽 bug）。 */
+      const pb = partBonus();
+      vehicle = {
+        id: vehicle.id, name: vehicle.name, emoji: vehicle.emoji, accent: vehicle.accent,
+        fromItem: vehicle.fromItem,
+        vmax:  vehicle.vmax  * pb.vmax,
+        jump:  vehicle.jump  * pb.jump,
+        accel: vehicle.accel * pb.accel,
+        // brake 是"松手后速度的保留率"，越接近 1 越滑。车架等级越高越抓地（更容易停），
+        // 但下限锁 0.80 —— 再低就硬得像撞墙，操控手感反而变差。
+        brake: Math.max(0.80, Math.min(0.97, vehicle.brake + pb.brakeAdd)),
+      };
+
       // 每日挑战用固定 seed 随机源；普通模式恢复真随机（保证每次都不一样）
       if (!dailyMode) rng = Math.random;
 
@@ -575,6 +734,8 @@
       floaters = [];
       runClean = true;             // 每次生成新关卡重置完美标记
       runScore = 0;                // 每次生成新关卡重置评分/连击/评级
+      runCoins = 0;                // 本关金币结算重置
+      runCoinsDoubled = false;     // 翻倍机会重置
       runCombo = 0;
       runGrade = null;
 
@@ -746,6 +907,7 @@
       if (state !== 'playing') { stepParticles(); return; }
       const p = player;
       timeAcc += FIXED_DT;
+      touchIdle(false);   // 游戏进行中持续推进"最后活跃时间"（内部有节流）
       if (p.landT > 0) p.landT--;   // 落地压扁动画倒计时（squash & stretch）
       if (magnetLeft > 0) magnetLeft--;   // 道具「磁力球」剩余帧
       if (boostLeft > 0) boostLeft--;     // 道具「加速靴」剩余帧
@@ -910,9 +1072,15 @@
           // 评分：每星 30 + 连击加成（连击越高越值钱，奖励连续无伤吃星）
           const pts = 30 + (comboCount - 1) * 5;
           runScore += pts;
+          /* 金币同步实时累积（吃一颗星立刻 +金币）。
+           * 为什么要实时而不是通关后一次结算：金币数字在屏幕上肉眼可见地往上跳，
+           * 是这类"点击产出"游戏最核心的即时正反馈（《合成竞速之王》点屏幕出金币
+           * 就是同一个道理）。攒到最后才给，爽感会损失一大半。 */
+          const coinGain = Math.max(1, Math.round(2 * partBonus().coin));
+          runCoins += coinGain;
           sfx.play('coin');
           spawnBurst(s.x, s.y, '#ffd24a', 12);
-          pushFloater(s.x, s.y - 10, '+' + pts, '#ffd24a');
+          pushFloater(s.x, s.y - 10, '+' + pts + '  🪙+' + coinGain, '#ffd24a');
           if (comboCount >= 2) pushFloater(s.x, s.y - 32, comboCount + ' 连击！', '#7afcff');
         }
       }
@@ -1074,6 +1242,12 @@
       if (save.house >= 3) unlockAchievement('house3');
       // 段位系统：累计总分
       save.totalScore = (save.totalScore | 0) + runScore;
+      /* 金币结算 —— 改装系统的唯一金币来源。
+       * 两部分：跑关过程里吃星实时攒的（runCoins）+ 通关奖励。
+       * 通关奖励让"跑得干净 / 评价高"直接等于"更多金币"，把玩家往更好的表现推；
+       * 整体再乘氮气零件的金币加成，让"升级 → 收益更高"这条循环真正闭环。 */
+      runCoins += Math.round((runScore * 1.0 + level * 20) * partBonus().coin);
+      addCoins(runCoins);
       persist();
     }
 
@@ -1097,13 +1271,17 @@
 
     function doubleRewardByAd() {
       if (state !== 'cleared') return;
+      if (runCoinsDoubled) { toast('本关奖励已经翻倍过啦～'); return; }
       const cb = function (ok) {
         if (!ok) { toast('广告未看完'); return; }
         save.gifts = (save.gifts | 0) + runGifts;
         runGifts *= 2;
+        addCoins(runCoins);              // 金币同步翻倍（跟礼物一个价，公平且好理解）
+        runCoins *= 2;
+        runCoinsDoubled = true;
         persist();
         sfx.play('coin');
-        toast('奖励翻倍！+ ' + runGifts + ' 🎁');
+        toast('奖励翻倍！+' + runGifts + ' 🎁  +' + runCoins + ' 🪙');
       };
       ads.showRewarded('double', cb);
     }
@@ -1747,6 +1925,15 @@
       ART.drawPet(id, g, x, y, s, flip, t, run, save.eq);
     }
 
+    /* 全屏菜单态：这些界面是"模态面板"，底下的游戏世界/关卡 HUD 没有信息价值，
+     * 画出来只会跟面板内容抢视觉（工坊 5 行卡片曾被 HUD 和关卡宠物糊成一团）。
+     * 统一在这里判定，HUD、虚拟按键、遮罩浓度都读它，避免三处各判一遍。 */
+    function isMenuState(s) {
+      return s === 'cover' || s === 'scores' || s === 'achievements' || s === 'daily' ||
+             s === 'bag' || s === 'sign' || s === 'chest' || s === 'quest' ||
+             s === 'freeItem' || s === 'garage';
+    }
+
     function render() {
       const w = view.w, h = view.h;
       ctx.clearRect(0, 0, w, h);
@@ -1778,7 +1965,6 @@
       drawToast();
       drawVignette(w, h);
     }
-
     // 暗角（2.5D 精致化）：屏幕边缘轻微压暗，聚焦画面中心，提升质感
     function drawVignette(w, h) {
       const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.36, w / 2, h / 2, Math.max(w, h) * 0.74);
@@ -2383,7 +2569,8 @@
     function drawHUD() {
       // cover/room 是全屏场景；cleared 是结算面板——关卡号、礼物数、评级在结算里
       // 已经全部呈现，再叠一层 HUD 只会挤占顶部空间（成就/任务提示条正好也抢这块地）。
-      if (state === 'cover' || state === 'room' || state === 'cleared') return;
+      // 菜单态（工坊/背包/签到等）同理：它们是模态面板，HUD 会跟面板标题抢位置。
+      if (isMenuState(state) || state === 'room' || state === 'cleared') return;
       const w = view.w;
       // 左上：关卡 + 三颗心 + 喇叭（三心机制：撞到障碍/掉坑各扣 1 心）
       panel(12, 12, 214, 46, 23);
@@ -2435,6 +2622,15 @@
       ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillText(runGifts, w - 154, 36);
 
+      /* 本关金币：实时往上跳的数字（吃星立刻 +）。
+       * 放在礼物面板正下方而不是别处 —— 两者都是"这一局我赚到了什么"，
+       * 放在一起玩家扫一眼就够，不用满屏找。 */
+      panel(w - 128, 66, 78, 32, 16);
+      ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('🪙' + runCoins, w - 128 + 39, 66 + 17);
+      ctx.textAlign = 'left';
+
       // 顶部进度条（胶囊 + 光泽）
       const bx = 232, bw = Math.max(120, w - 496), by = 35;
       ctx.fillStyle = 'rgba(255,255,255,0.22)';
@@ -2477,6 +2673,8 @@
     const pointerMap = new Map();
 
     function drawTouchControls() {
+      // 菜单态不画虚拟按键：那时玩家在点面板按钮，方向键留在屏幕上既没用又碍事
+      if (isMenuState(state) || state === 'room') return;
       layoutButtons();
       for (const b of touchButtons) {
         if (b.hidden) continue;
@@ -2597,6 +2795,26 @@
       } else if (state === 'sign' || state === 'chest' || state === 'quest' || state === 'freeItem') {
         // 留存系统子界面：返回按钮
         btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
+      } else if (state === 'garage') {
+        /* 改装工坊：每行右侧「买 / 合成」两个操作键，底部「一键合成」+「返回」。
+         * 热区几何全部取自 garageLayout()，与 drawGarage 共用同一份公式 ——
+         * 分头各算一遍就是"画的和点的对不上"这类 bug 的经典来源。 */
+        const gl = garageLayout(w, h);
+        gl.rows.forEach(function (r, i) {
+          btn(r.buyX, r.btnY, r.btnW, r.btnH, '', 'buy:' + PART_SLOTS[i].id, false, true);
+          btn(r.mergeX, r.btnY, r.btnW, r.btnH, '', 'merge:' + PART_SLOTS[i].id, false, true);
+        });
+        const mc = mergeableCount();
+        /* 底部动作区：有可合成时并排两个键，否则只留返回（居中）——
+         * 按钮宽度按可用宽度自适应，短屏也不会挤出屏幕。 */
+        const bw = Math.min(150, (w - 60) / 2);
+        const by = h - 68, bh = 46;
+        if (mc > 0) {
+          btn(w / 2 - bw - 6, by, bw, bh, '⚡ 一键合成 ' + mc, 'mergeAll');
+          btn(w / 2 + 6, by, bw, bh, '返回', 'back', true);
+        } else {
+          btn(w / 2 - bw / 2, by, bw, bh, '返回', 'back', true);
+        }
       }
     }
     function btn(x, y, w, h, label, id, secondary, hidden) {
@@ -2614,6 +2832,155 @@
       const gy = topY + 70;
       return { gs: gs, gx: gx, gy: gy };
     }
+    /* 封面「工坊 + 离线收益」两张卡片的几何。
+     * drawCover 与 buildCoverButtons 必须共用这一份公式 —— 分头各算一遍就会出现
+     * "画的位置和点的位置差几像素"的经典 bug（背包 3×3 已经踩过一次）。
+     *
+     * 布局分两种模式，因为横竖屏画布尺寸差得极远（横屏 900×506、竖屏 660×1428）：
+     *  - 竖屏：宠物网格下方有大片空白（千余像素），卡片直接竖排铺在网格下面。
+     *  - 横屏：宠物网格 3 行就把 506 的高度吃完了，网格下方根本没有空间放卡片
+     *    （曾经因此把工坊卡画到屏幕外，等于新功能在桌面上完全不可见）。
+     *    横屏改为放到网格**左侧**的空白区，右侧留给入口按钮列。
+     */
+    function coverCards(w, h) {
+      const grid = coverGrid();
+      const portrait = !!view.portrait;
+      let cw, top;
+      if (portrait) {
+        const infoY = grid.gy + 3 * (grid.gs + 12) + 34;
+        cw = w - 152; top = infoY + 16;
+      } else {
+        cw = Math.max(170, Math.min(280, grid.gx - 34));
+        top = grid.gy + 6;
+      }
+      const availH = Math.max(88, (h - 16) - top);
+      const gh = Math.min(portrait ? 176 : 124, Math.max(88, availH - (portrait ? 128 : 60)));
+      let ih = availH - gh - 8;
+      if (ih < 52) ih = 0; else ih = Math.min(ih, portrait ? 130 : 92);
+      return {
+        x: 14, w: cw,
+        garageY: top, garageH: gh,
+        idleY: top + gh + 8, idleH: ih,
+      };
+    }
+
+    /* 工坊卡片：按卡片高度自适应三档内容密度。
+     * 为什么不写死排版：竖屏卡高 176、横屏只有 124、极窄屏可能压到 88，
+     * 固定坐标在矮卡上必然重叠 —— 这里用高度决定"画几行"，任何尺寸都不糊。 */
+    function drawGarageCard(gc) {
+      const gh = gc.garageH;
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      roundRect(gc.x, gc.garageY, gc.w, gh, 16); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,210,74,0.62)'; ctx.lineWidth = 2;
+      roundRect(gc.x, gc.garageY, gc.w, gh, 16); ctx.stroke();
+
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold 17px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText('🔧 改装工坊', gc.x + 16, gc.garageY + 26);
+
+      // 右上角「可合成」红点 —— 让"有事可做"这件事自己跳出来
+      const mc = mergeableCount();
+      if (mc > 0) {
+        const bx = gc.x + gc.w - 22;
+        ctx.fillStyle = '#ff4d6d';
+        ctx.beginPath(); ctx.arc(bx, gc.garageY + 24, 10, 0, 6.283); ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(mc), bx, gc.garageY + 25);
+        ctx.textAlign = 'left';
+      }
+
+      if (gh >= 112) {
+        // 5 个部位的迷你等级徽章一行铺开，一眼看出短板在哪
+        const stepW = (gc.w - 32) / PART_SLOTS.length;
+        for (let i = 0; i < PART_SLOTS.length; i++) {
+          const s = PART_SLOTS[i];
+          const lv = partBestLv(s.id);
+          const bx2 = gc.x + 16 + i * stepW;
+          const by2 = gc.garageY + 46;
+          ctx.fillStyle = 'rgba(0,0,0,0.28)';
+          roundRect(bx2, by2, stepW - 6, 32, 8); ctx.fill();
+          if (lv > 0) {
+            ctx.strokeStyle = s.tint; ctx.lineWidth = 1.5;
+            roundRect(bx2, by2, stepW - 6, 32, 8); ctx.stroke();
+          }
+          ctx.textAlign = 'center';
+          ctx.font = '14px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+          ctx.fillStyle = lv ? '#fff' : 'rgba(255,255,255,0.32)';
+          ctx.fillText(s.icon, bx2 + (stepW - 6) / 2, by2 + 12);
+          ctx.font = 'bold 10px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.fillStyle = lv ? s.tint : 'rgba(255,255,255,0.32)';
+          ctx.fillText(lv ? PART_LV_NAME[lv] : '—', bx2 + (stepW - 6) / 2, by2 + 24);
+          ctx.textAlign = 'left';
+        }
+        const power = garagePower();
+        const maxPower = PART_MAX_LV * PART_SLOTS.length;
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#7afcff';
+        ctx.fillText('车库强度 ' + power + '/' + maxPower, gc.x + 16, gc.garageY + 98);
+        // 强度进度条：把"还差多少满级"变成一条看得见的线
+        const barW = gc.w - 32;
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        roundRect(gc.x + 16, gc.garageY + 112, barW, 6, 3); ctx.fill();
+        ctx.fillStyle = '#7afcff';
+        roundRect(gc.x + 16, gc.garageY + 112, Math.max(2, barW * (power / maxPower)), 6, 3); ctx.fill();
+      } else {
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#7afcff';
+        ctx.fillText('车库强度 ' + garagePower() + ' · 点我升级 ▸', gc.x + 16, gc.garageY + gh * 0.70);
+      }
+      if (gh >= 170) {
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillText('点这里升级零件，跑得更快 ▸', gc.x + gc.w / 2, gc.garageY + gh - 22);
+      }
+    }
+
+    function drawIdleCard(gc) {
+      const p = idlePending();
+      const ready = p.coins > 0;
+      const top = gc.idleY, hgt = gc.idleH;
+      ctx.fillStyle = ready ? 'rgba(122,252,255,0.14)' : 'rgba(255,255,255,0.07)';
+      roundRect(gc.x, top, gc.w, hgt, 14); ctx.fill();
+      ctx.strokeStyle = ready ? 'rgba(122,252,255,0.75)' : 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = ready ? 2 : 1;
+      roundRect(gc.x, top, gc.w, hgt, 14); ctx.stroke();
+
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = ready ? '#7afcff' : 'rgba(255,255,255,0.55)';
+      ctx.fillText('📦 宠物快递站', gc.x + 16, top + 24);
+
+      const line2 = ready
+        ? ('收到 +' + p.coins + ' 🪙' + (p.capped ? '（已满仓）' : ''))
+        : ('离线也在赚：每小时 ' + Math.round(IDLE_PER_HOUR * partBonus().coin) + ' 🪙');
+      ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.82)';
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(gc.x + 16, top + 34, gc.w - 100, 24); ctx.clip();
+      ctx.fillText(line2, gc.x + 16, top + 48);
+      ctx.restore();
+      ctx.font = '10px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillText('最多累计 8 小时', gc.x + 16, top + hgt - 14);
+
+      if (ready) {
+        const btnW = 66, btnH = 30;
+        const bx = gc.x + gc.w - btnW - 14, by = top + (hgt - btnH) / 2;
+        ctx.fillStyle = '#7afcff';
+        roundRect(bx, by, btnW, btnH, btnH / 2); ctx.fill();
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#12101f';
+        ctx.fillText('领取', bx + btnW / 2, by + btnH / 2);
+        ctx.textAlign = 'left';
+      }
+    }
+
     function buildCoverButtons(w, h) {
       const grid = coverGrid();
       for (let i = 0; i < PETS.length; i++) {
@@ -2642,6 +3009,12 @@
       for (let i = 0; i < entrys.length; i++) {
         overlayButtons.push({ x: ex, y: ey - i * 54, w: 112, h: 44, label: entrys[i].label, id: entrys[i].id, secondary: true });
       }
+      // 改装工坊 / 离线收益：热区与 drawCover 共用 coverCards 几何
+      const cc = coverCards(w, h);
+      overlayButtons.push({ x: cc.x, y: cc.garageY, w: cc.w, h: cc.garageH, hidden: true, id: 'garage' });
+      if (cc.idleH > 0 && idlePending().coins > 0) {
+        overlayButtons.push({ x: cc.x, y: cc.idleY, w: cc.w, h: cc.idleH, hidden: true, id: 'idle' });
+      }
     }
 
     function drawOverlay() {
@@ -2649,11 +3022,21 @@
       if (state === 'playing' || state === 'room') return;
       const w = view.w, h = view.h;
       ctx.save();
-      // 精致暗紫遮罩（比纯黑更通透）
+      /* 精致暗紫遮罩（比纯黑更通透）。
+       * 菜单态加深到近乎不透明：这些面板信息密度高（工坊 5 行、宝箱列表），
+       * 半透明的关卡世界透上来会把卡片糊脏；paused/dead/cleared 则保持通透，
+       * 因为那时候"看到自己刚才跑到哪"是有意义的。 */
+      const menu = isMenuState(state);
       const ov = ctx.createLinearGradient(0, 0, 0, h);
-      ov.addColorStop(0, 'rgba(16,10,34,0.78)');
-      ov.addColorStop(0.5, 'rgba(10,8,18,0.82)');
-      ov.addColorStop(1, 'rgba(16,10,34,0.9)');
+      if (menu) {
+        ov.addColorStop(0, 'rgba(16,10,34,0.96)');
+        ov.addColorStop(0.5, 'rgba(10,8,18,0.97)');
+        ov.addColorStop(1, 'rgba(16,10,34,0.98)');
+      } else {
+        ov.addColorStop(0, 'rgba(16,10,34,0.78)');
+        ov.addColorStop(0.5, 'rgba(10,8,18,0.82)');
+        ov.addColorStop(1, 'rgba(16,10,34,0.9)');
+      }
       ctx.fillStyle = ov;
       ctx.fillRect(0, 0, w, h);
 
@@ -2669,6 +3052,7 @@
       else if (state === 'chest') drawChests(w, h);
       else if (state === 'quest') drawQuests(w, h);
       else if (state === 'freeItem') drawFreeItem(w, h);
+      else if (state === 'garage') drawGarage(w, h);
 
       drawOverlayButtons();
       ctx.restore();
@@ -2833,6 +3217,27 @@
       ctx.fillStyle = save.house >= 3 ? '#9af29a' : 'rgba(255,255,255,0.8)';
       ctx.font = '900 15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillText(save.house >= 3 ? '🏠 大房子已建成' : '🏠 房子 ' + save.house + '/3', cx + 172, infoY);
+
+      /* ---------- 金币胶囊（右上角）---------- */
+      const coinTxt = '🪙 ' + (save.coins | 0);
+      ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+      const cw = Math.max(ctx.measureText(coinTxt).width + 26, 88);
+      ctx.fillStyle = 'rgba(10,8,18,0.55)';
+      roundRect(w - cw - 14, 14, cw, 30, 15); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,210,74,0.85)'; ctx.lineWidth = 1.5;
+      roundRect(w - cw - 14, 14, cw, 30, 15); ctx.stroke();
+      ctx.fillStyle = '#ffd24a';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(coinTxt, w - cw / 2 - 14, 29);
+
+      /* ---------- 改装工坊 + 离线收益（借鉴《合成竞速之王》的核心循环）----------
+       * 为什么必须在封面而不是埋进右侧那排小按钮：改装是这个游戏新的核心循环
+       * （跑关 → 得金币 → 买零件 → 合成升级 → 跑得更爽 → 更多金币），核心循环
+       * 必须一眼可见、一点直达；混在 8 个同级小按钮里等于没有。
+       * 具体摆哪儿由 coverCards() 按横竖屏决定，此处只负责画。 */
+      const cards = coverCards(w, h);
+      drawGarageCard(cards);
+      if (cards.idleH > 0) drawIdleCard(cards);
     }
     function drawGiftIconSmall(ctx2, x, y, s) {
       ctx2.save();
@@ -3070,9 +3475,15 @@
       ctx.fillStyle = '#ffd24a';
       drawGiftIconSmall(ctx, cx - 38, bandY - 10, 13);
       ctx.fillText('本关礼物 ' + runGifts, cx - 20, bandY - 10);
+      // 金币收入：结算里必须露脸 —— 玩家要清楚"这一局赚了多少金币"，
+      // 才会去工坊把它花掉，整条经济循环才转得起来。
+      ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#ffd24a';
+      ctx.fillText('🪙 +' + runCoins + (runCoinsDoubled ? '（已翻倍）' : '') +
+                   '   共 ' + (save.coins | 0), cx - 38, bandY + 10);
       // 掉落道具：竖排贴在礼物下方，名字用稀有度配色，玩家一眼看出成色
       if (droppedItems.length) {
-        let dy = bandY + 14;
+        let dy = bandY + 34;
         for (const it of droppedItems) {
           ctx.font = '15px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
           ctx.fillStyle = '#fff';
@@ -3276,6 +3687,122 @@
     }
 
     /* ---------- 签到界面 ---------- */
+    /* ---------- 改装工坊（借鉴《合成竞速之王》的零件合成循环） ---------- */
+    /* 几何函数必须被 drawGarage 和 overlayLayout 共用 —— 两处各算一遍是"画的和点的
+     * 对不上"这类 bug 的经典来源（背包界面已经踩过一次这个坑）。 */
+    function garageLayout(w, h) {
+      const topY = h * 0.183;
+      const bottomY = h - 86;          // 给底部「一键合成 / 返回」留出空间
+      const n = PART_SLOTS.length;
+      const gap = 8;
+      const rowH = Math.max(44, (bottomY - topY - gap * (n - 1)) / n);
+      const rows = [];
+      for (let i = 0; i < n; i++) rows.push({ x: 12, y: topY + i * (rowH + gap), w: w - 24, h: rowH });
+      // 每行右侧的两个操作键几何（买 / 合成），draw 与 hit 共用
+      const bw = 46, bgap = 6;
+      for (const r of rows) {
+        const bh = Math.max(26, Math.min(34, r.h - 20));
+        r.btnW = bw; r.btnH = bh;
+        r.buyX = r.x + r.w - (bw * 2 + bgap) - 10;
+        r.mergeX = r.buyX + bw + bgap;
+        r.btnY = r.y + (r.h - bh) / 2;
+      }
+      return { rows: rows, rowH: rowH, gap: gap, btnGap: bgap };
+    }
+    function partBonusText(s) {
+      const lv = partBestLv(s.id);
+      if (!lv) return s.desc + ' 未升级';
+      return s.desc + ' +' + Math.round(Math.abs(s.per) * lv * 100) + '%';
+    }
+    function partInvText(s) {
+      const arr = [];
+      for (let q = 1; q <= PART_MAX_LV; q++) { const c = partCount(s.id, q); if (c > 0) arr.push(PART_LV_NAME[q] + '×' + c); }
+      return arr.length ? arr.join(' ') : '暂无零件';
+    }
+    function drawGarage(w, h) {
+      /* 顶部区高度按画布高自适应。
+       * 横屏画布只有 ~506 高，用 h*0.086 这种比例算出来的行距只有 10px，
+       * 标题、金币、说明会叠在一起；改成"固定行高 + 上限"就能在两种比例下都稳。 */
+      const tSize = h < 620 ? 26 : 30;
+      const yTitle = Math.max(30, h * 0.072);
+      const yInfo = yTitle + tSize * 0.95;
+      const yHint = yInfo + 20;
+      gradientTitle('🔧 改装工坊', w / 2, yTitle, tSize);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#ffd24a';
+      ctx.fillText('🪙 ' + (save.coins | 0), w / 2 - 62, yInfo);
+      ctx.fillStyle = '#7afcff';
+      ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText('每个零件 ' + PART_PRICE + ' 🪙 · 强度 ' + garagePower() + '/' + (PART_MAX_LV * PART_SLOTS.length), w / 2 + 66, yInfo);
+      ctx.font = '11px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('两个同级零件 = 合出高一级 · 等级越高跑得越快', w / 2, yHint);
+
+      const gl = garageLayout(w, h);
+      for (let i = 0; i < PART_SLOTS.length; i++) {
+        const s = PART_SLOTS[i];
+        const r = gl.rows[i];
+        const lv = partBestLv(s.id);
+        const maxed = lv >= PART_MAX_LV;
+
+        ctx.fillStyle = 'rgba(255,255,255,0.07)';
+        roundRect(r.x, r.y, r.w, r.h, 12); ctx.fill();
+        ctx.strokeStyle = maxed ? '#ffd24a' : (lv ? 'rgba(255,255,255,0.24)' : 'rgba(255,255,255,0.12)');
+        ctx.lineWidth = maxed ? 2 : 1;
+        roundRect(r.x, r.y, r.w, r.h, 12); ctx.stroke();
+        // 左侧色条：5 个部位一眼区分
+        ctx.fillStyle = s.tint;
+        roundRect(r.x + 8, r.y + 10, 5, r.h - 20, 2.5); ctx.fill();
+
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.font = '18px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(s.icon, r.x + 20, r.y + r.h * 0.35);
+
+        ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+        const nameW = ctx.measureText(s.name).width;
+        ctx.fillStyle = '#fff';
+        ctx.fillText(s.name, r.x + 46, r.y + r.h * 0.35);
+        if (lv > 0) {
+          ctx.fillStyle = s.tint;
+          roundRect(r.x + 46 + nameW + 7, r.y + r.h * 0.35 - 9, 32, 18, 9); ctx.fill();
+          ctx.fillStyle = '#12101f';
+          ctx.font = 'bold 11px "PingFang SC","Microsoft YaHei",sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(PART_LV_NAME[lv], r.x + 46 + nameW + 23, r.y + r.h * 0.35);
+          ctx.textAlign = 'left';
+        }
+        // 第二行：加成 + 库存。裁切防溢出——窄屏上宁可截断也不能糊成一团。
+        const textRight = r.buyX - 8;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(r.x + 46, r.y + r.h * 0.50, Math.max(20, textRight - r.x - 46), r.h * 0.46);
+        ctx.clip();
+        ctx.font = '11px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = lv ? 'rgba(122,252,255,0.92)' : 'rgba(255,255,255,0.42)';
+        ctx.fillText(partBonusText(s) + '  ·  ' + partInvText(s), r.x + 46, r.y + r.h * 0.73);
+        ctx.restore();
+
+        // 「买」按钮：金币不够时变灰（仍然可点，点了给出提示，避免"点了没反应"的困惑）
+        const afford = (save.coins | 0) >= PART_PRICE;
+        ctx.fillStyle = maxed ? 'rgba(255,255,255,0.10)' : (afford ? '#ffd24a' : 'rgba(255,255,255,0.16)');
+        roundRect(r.buyX, r.btnY, r.btnW, r.btnH, r.btnH / 2); ctx.fill();
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = maxed ? 'rgba(255,255,255,0.4)' : (afford ? '#12101f' : 'rgba(255,255,255,0.55)');
+        ctx.fillText(maxed ? '满级' : '买', r.buyX + r.btnW / 2, r.btnY + r.btnH / 2);
+
+        // 「合成」按钮：只有真的能合才高亮，不可合时压暗 —— 让可操作性自己说话
+        const canM = canMerge(s.id, lv);
+        ctx.fillStyle = canM ? '#7afcff' : 'rgba(255,255,255,0.13)';
+        roundRect(r.mergeX, r.btnY, r.btnW, r.btnH, r.btnH / 2); ctx.fill();
+        ctx.fillStyle = canM ? '#12101f' : 'rgba(255,255,255,0.42)';
+        ctx.fillText('合成', r.mergeX + r.btnW / 2, r.btnY + r.btnH / 2);
+        ctx.textAlign = 'left';
+      }
+    }
+
     function drawSign(w, h) {
       gradientTitle('📌 每日签到', w / 2, h * 0.10, 34);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -3439,7 +3966,7 @@
       //     258 以下，直接压住背包/任务列表的第一行）
       //   无 HUD 的界面（封面/结算）→ 直接占顶部。结算界面必须走顶部——它的
       //     「关卡通过！」大标题就在 0.20 高度，提示条若还停在中间会正好盖住标题。
-      const hasHud = state !== 'cover' && state !== 'room' && state !== 'cleared';
+      const hasHud = !isMenuState(state) && state !== 'room' && state !== 'cleared';
       const ty = hasHud ? 112 : 22;
       ctx.fillStyle = 'rgba(18,14,28,0.86)';
       roundRect(w / 2 - tw / 2, ty, tw, 40, 20); ctx.fill();
@@ -3551,6 +4078,36 @@
         toast(save.equipped ? ('下一关携带：' + it.icon + ' ' + it.name) : '已取消携带');
         return;
       }
+      /* ---- 改装工坊：买零件 / 合成 ---- */
+      if (id.indexOf('buy:') === 0) {
+        const sid = id.slice(4);
+        const s = PART_BY_ID[sid];
+        if (!s) return;
+        if ((save.coins | 0) < PART_PRICE) { toast('金币不够，再跑几关就有啦～'); return; }
+        buyPart(sid);
+        sfx.play('coin');
+        toast(s.icon + ' ' + s.name + ' Ⅰ 到手！两个同级就能合成');
+        return;
+      }
+      if (id.indexOf('merge:') === 0) {
+        const sid = id.slice(6);
+        const s = PART_BY_ID[sid];
+        if (!s) return;
+        const lv = partBestLv(sid);
+        if (lv >= PART_MAX_LV) { toast(s.name + ' 已经是满级啦！'); return; }
+        if (!canMerge(sid, lv)) {
+          if (partOwned(sid) === 0) { toast('还没有 ' + s.name + ' 零件，先买一个吧'); return; }
+          // 提示要具体到"还差几个"，不然玩家只能猜
+          const have = partCount(sid, lv);
+          toast(s.name + ' ' + PART_LV_NAME[lv] + ' 还差 ' + (2 - have) + ' 个才能合成');
+          return;
+        }
+        mergeOne(sid, lv);
+        sfx.play('merge');
+        spawnBurst(view.w / 2, view.h * 0.35, s.tint, 26);
+        toast('合成成功！' + s.name + ' → ' + PART_LV_NAME[lv + 1]);
+        return;
+      }
       switch (id) {
         case 'bag': state = 'bag'; sfx.play('click'); break;
         case 'pause':
@@ -3576,6 +4133,25 @@
           state = 'quest'; sfx.play('click'); break;
         case 'freeItem':
           state = 'freeItem'; sfx.play('click'); break;
+        case 'garage':
+          state = 'garage'; sfx.play('click'); break;
+        case 'idle': {
+          // 离线收益：进游戏时就已到账（见 createGame 的启动结算），
+          // 所以这里只负责把待收的那份也领掉，绝不重复发放。
+          const got = collectIdle(1);
+          if (got > 0) { sfx.play('coin'); toast('快递站收货 +' + got + ' 🪙'); }
+          else { toast('包裹还在路上，跑几关再来～'); }
+          break;
+        }
+        case 'mergeAll': {
+          const n = mergeAll();
+          if (n > 0) {
+            sfx.play('merge');
+            spawnBurst(view.w / 2, view.h * 0.35, '#7afcff', 34);
+            toast('一键合成 ' + n + ' 次！零件全面升级');
+          } else { toast('暂时没有能合成的零件（需要两个同级的）'); }
+          break;
+        }
         case 'back': state = 'cover'; sfx.play('click'); dailyMode = false; rng = Math.random; break;
         case 'revive': reviveByAd(); break;
         case 'double': doubleRewardByAd(); break;
@@ -3738,6 +4314,18 @@
     generateLevel(1);
     state = 'cover';
 
+    /* 回访欢迎：把"离线收益"这件事主动告诉玩家一次。
+     * 如果只是静静躺在卡片上，大部分玩家永远不会注意到自己有一笔钱待领 ——
+     * 离线收益的留存价值全在"回来就有收获"这个瞬间被感知到。 */
+    if (idlePending().coins > 0) {
+      const p = idlePending();
+      const mins = Math.floor(p.sec / 60);
+      const dur = mins >= 60 ? (Math.floor(mins / 60) + ' 小时') : (mins + ' 分钟');
+      setTimeout(function () {
+        toast('📦 你不在的 ' + dur + ' 里，快递站赚了 ' + p.coins + ' 🪙，点封面卡片领取～');
+      }, 600);
+    }
+
     return {
       tick: tick,
       resize: resize,
@@ -3755,11 +4343,45 @@
         getPlayer: function () { return player; },
         getLevel: function () { return { level: level, width: levelWidth, platforms: platforms, hazards: hazards, stars: stars, goal: goal }; },
         getSave: function () { return save; },
+        /* 暴露当前界面所有按钮的几何 + 中心点。
+         * 为什么值得暴露：自动化测试如果自己硬编码坐标，一旦布局微调就全红，
+         * 而"重算一遍布局公式"本身就是最容易写错的地方（等式两边一起错就测不出来）。
+         * 直接读游戏自己算出来的按钮，才是真正在测"玩家点得到吗"。 */
+        getButtons: function () {
+          overlayLayout();
+          return overlayButtons.map(function (b) {
+            return { id: b.id, x: b.x, y: b.y, w: b.w, h: b.h,
+                     cx: b.x + b.w / 2, cy: b.y + b.h / 2, hidden: !!b.hidden, label: b.label };
+          });
+        },
         getRunClean: function () { return runClean; },
         enterDaily: function () { enterDaily(); },
-        goTo: function (s) { if (['cover','scores','achievements','daily'].indexOf(s)>=0) { state = s; stopBgm(); } },
+        goTo: function (s) {
+          const ok = ['cover','scores','achievements','daily','bag','sign','chest','quest',
+                      'freeItem','garage','dead','cleared','paused','playing'];
+          if (ok.indexOf(s) >= 0) { state = s; stopBgm(); }
+        },
         grantAccessories: function () { for (const a of ACCESSORIES) if (save.acc.indexOf(a.id) < 0) save.acc.push(a.id); persist(); },
         setInput: function (k, v) { if (k === 'jump' && v && !input.jump) jumpBuffer = BUFFER; input[k] = v; if (k === 'jump' && v) jumpHeld = true; },
+        /* 改装 / 经济系统的测试入口 */
+        getCoins: function () { return save.coins | 0; },
+        grantCoins: function (n) { addCoins(n); return save.coins | 0; },
+        getGarage: function () {
+          const out = {};
+          for (const s of PART_SLOTS) {
+            out[s.id] = { best: partBestLv(s.id), owned: partOwned(s.id), levels: save.parts[s.id].slice() };
+          }
+          return { coins: save.coins | 0, power: garagePower(), mergeable: mergeableCount(), parts: out, bonus: partBonus() };
+        },
+        setPart: function (slot, lv, n) {
+          if (!PART_BY_ID[slot]) return false;
+          lv = Math.max(1, Math.min(PART_MAX_LV, lv | 0));
+          save.parts[slot][lv - 1] = Math.max(0, n | 0);
+          persist(); return true;
+        },
+        getIdle: function () { return idlePending(); },
+        setIdleAgo: function (sec) { save.idleAt = Date.now() - sec * 1000; persist(); },
+        collectIdle: function (m) { return collectIdle(m); },
       },
     };
   }
@@ -3936,6 +4558,13 @@
       jump:  function () { tone(360, 720, 0.14, 'triangle', 0.42); },
       land:  function () { noise(0.07, 0.16); },
       coin:  function () { tone(880, 880, 0.07, 'square', 0.30); tone(1320, 1320, 0.10, 'square', 0.26, 0.06); },
+      /* 合成音：一串快速上行音阶 —— 借鉴《合成大西瓜》的思路，
+       * 用"叮叮叮"的连续上行音把"变强了"这件事直接写进耳朵里，
+       * 这是整个循环里最该被强化的正反馈时刻。 */
+      merge: function () {
+        const seq = [523, 659, 784, 1047];
+        for (let i = 0; i < seq.length; i++) tone(seq[i], seq[i], 0.09, 'triangle', 0.34, i * 0.055);
+      },
       hurt:  function () { tone(320, 110, 0.26, 'sawtooth', 0.34); noise(0.12, 0.18); },
       fall:  function () { tone(440, 70, 0.50, 'sawtooth', 0.32); },
       clear: function () { [523, 659, 784, 1047].forEach(function (f, i) { tone(f, f, 0.16, 'triangle', 0.34, i * 0.09); }); },
