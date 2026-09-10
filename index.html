@@ -4,10 +4,10 @@
 <meta data-page-node-id="WWfbQkH9Rw68DLKXRMkndk" charset="UTF-8">
 <meta data-page-node-id="3ORILTwMBuB6RB89gQQPJD" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport">
 <meta data-page-node-id="71AXmNJjEj8n3UDHe6kc0S" content="#0a0812" name="theme-color">
-<meta data-page-node-id="muErowIjyZ1X0ISu1Xo4Kb" content="宠物大冒险 —— 横版闯关跑酷小游戏：选一只宠物，骑上载具，穿越六大主题关卡收集礼物。" name="description">
+<meta data-page-node-id="muErowIjyZ1X0ISu1Xo4Kb" content="疾风冲刺 —— 全民向横版闯关跑酷：选一位伙伴，骑上载具，改装合成，穿越六大主题关卡收集礼物。" name="description">
 <meta data-page-node-id="CdO6C6zKtc2jsVZ4ejzZiG" content="yes" name="apple-mobile-web-app-capable">
 <meta data-page-node-id="KPaV45GcaNt4R9SBYsWRVz" content="yes" name="mobile-web-app-capable">
-<title data-page-node-id="axFtbWaqlKVYdu3oPSz5HT" data-pnid-children="4rupHQJRc5Q2HRCzrKQ92O">宠物大冒险</title>
+<title data-page-node-id="axFtbWaqlKVYdu3oPSz5HT" data-pnid-children="4rupHQJRc5Q2HRCzrKQ92O">疾风冲刺</title>
 <style data-page-node-id="iFPriaAzie0koTAKu5U5YE" data-pnid-children="Qt223Rg8kk8a3vgyXicIXG">
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
@@ -29,7 +29,7 @@
 </div>
 <div data-page-node-id="RCTFKcf2IXTsWp8S1rwMq7" aria-hidden="true" id="safeProbe"></div>
 <script data-page-node-id="SIxNNeFfAVa9HW7rJqkPOq" data-pnid-children="lr4oRrhUDzr6HJgkjt2iBl">/* =============================================================================
- * 宠物大冒险 — 游戏内核（平台无关层）
+ * 疾风冲刺 — 游戏内核（平台无关层）
  * -----------------------------------------------------------------------------
  * 本文件不触碰任何 DOM / wx / tt API。所有平台能力通过 deps 注入：
  *   deps.ctx      2D 绘图上下文
@@ -188,6 +188,40 @@
   const PART_LV_NAME = [null, 'Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ'];
 
   /* ===========================================================================
+   * 难度分层：休闲 / 挑战（老少咸宜的核心机制）
+   *
+   * 一款游戏要同时服务小孩和成人，靠的不是把难度调成"中间值"——那会让两边都不满意。
+   * 正确做法是把难度做成玩家自选的两条轨道：
+   *  · 休闲：3 颗心，缺口留 28% 容错、障碍更疏，积分 1.0×
+   *  · 挑战：2 颗心，缺口只留 20% 容错、障碍更密，积分 2.0×、金币 1.6×
+   *          —— 风险与收益严格成正比
+   *
+   * 刻意不动载具速度：maxGap 是拿「默认载具」的跳跃距离算的（见 generateLevel），
+   * 若给某模式偷偷加速，跳跃距离反而变长、缺口相对变窄，难度会不升反降。
+   * 难度只从「容错率 + 障碍密度 + 心数」三处加。
+   *
+   * 评级（S/A/B/C）始终按"原始表现"计算，倍率只作用于积分与金币：
+   * 这样评级不会被倍率灌水，而挑战模式的高收益来自它真的更难。
+   * ======================================================================== */
+  const MODES = [
+    // 休闲档的每个边界值都刻意等于改造前的原值 —— 分层不等于把两边都动一遍，
+    // 新难度只加到挑战档，休闲档的手感必须原封不动（这才是"受众变宽"而不是"变难"）。
+    { id: 'casual', name: '休闲', icon: '🌤', lives: 3, gap: 0.00, gapMax: 0.50,
+      spacingAdd: 0,   spacingMin: 240, spacingMax: 360, cap: 16, minSpacingFloor: 230,
+      hazMarginK: 0.28, hazMarginMin: 100, hazMarginMax: 150,
+      margin: 0.72, score: 1.0, coin: 1.0, tag: '轻松体验', desc: '3 颗心 · 节奏舒缓' },
+    { id: 'pro',    name: '挑战', icon: '🔥', lives: 2, gap: 0.10, gapMax: 0.62,
+      spacingAdd: -70, spacingMin: 170, spacingMax: 360, cap: 22, minSpacingFloor: 170,
+      // 留白下限 80 而不是 60：再小玩家落地后只剩不到 0.2s 反应，那不是难，是不讲理
+      hazMarginK: 0.20, hazMarginMin: 80, hazMarginMax: 110,
+      margin: 0.80, score: 2.0, coin: 1.6, tag: '双倍积分', desc: '2 颗心 · 障碍更密' },
+  ];
+  const MODE_BY_ID = {};
+  for (const m of MODES) MODE_BY_ID[m.id] = m;
+  function modeOf(id) { return MODE_BY_ID[id] || MODES[0]; }
+
+
+  /* ===========================================================================
    * 留存与变现钩子（成人也要爱玩 + 广告位设计）
    * 四条钩子各自解决一个留存问题：
    * ① 每日签到 —— 解决"明天为什么还要打开"（连续签到奖励递增，断签重置）
@@ -207,11 +241,11 @@
     { icon: '🚀', item: 'jetpack', label: '火箭背包' },
   ];
   const RANKS = [
-    { name: '萌新铲屎官',   need: 0,     color: '#b9c6d6' },
-    { name: '见习冒险家',   need: 2000,  color: '#7bd88f' },
-    { name: '资深驯宠师',   need: 6000,  color: '#4dabf7' },
-    { name: '精英跑酷王',   need: 15000, color: '#cc5de8' },
-    { name: '传说宠物大师', need: 35000, color: '#ffd24a' },
+    { name: '起步新秀', need: 0,     color: '#b9c6d6' },
+    { name: '街头车手', need: 2000,  color: '#7bd88f' },
+    { name: '改装好手', need: 6000,  color: '#4dabf7' },
+    { name: '疾风精英', need: 15000, color: '#cc5de8' },
+    { name: '传说车神', need: 35000, color: '#ffd24a' },
   ];
   function rankOf(total) {
     let r = RANKS[0];
@@ -246,6 +280,8 @@
     { id: 'gradeS',      icon: '⭐', name: '满分达人',   desc: '一关拿到 S 评级' },
     { id: 'play20',      icon: '🎮', name: '老玩家',     desc: '累计挑战 20 局' },
     { id: 'house3',      icon: '🏠', name: '有房一族',   desc: '建成大房子（完美通关 3 关）' },
+    { id: 'endless300',  icon: '🏃', name: '疾风跑者',   desc: '无尽冲刺跑过 300 米' },
+    { id: 'endless1000', icon: '🌪', name: '追风少年',   desc: '无尽冲刺跑过 1000 米' },
   ];
 
   /* ===========================================================================
@@ -342,6 +378,12 @@
       }
     }
     if (typeof save.idleAt !== 'number' || save.idleAt <= 0) save.idleAt = Date.now();
+    // 难度模式（休闲 / 挑战）：老少咸宜的分层开关，定义见 MODES
+    if (typeof save.mode !== 'string' || !MODE_BY_ID[save.mode]) save.mode = 'casual';
+    // 精通星级：level → 该关历史最好星级(1~3)。跨会话保留，只增不减。
+    if (!save.stars || typeof save.stars !== 'object') save.stars = {};
+    // 无尽冲刺：历史最远距离（米）。无尽没有关卡号，「最远」就是它的长期目标。
+    if (!save.endlessBest) save.endlessBest = 0;
     function persist() { storage.set(SKEY, save); }
 
     /* ---------- 道具掉落与背包 ---------- */
@@ -407,6 +449,25 @@
       }
       return b;
     }
+
+    /* ---------- 难度模式 ---------- */
+    /* 选择要存进存档：跨会话保留。默认休闲 —— 新玩家不该一上来就被劝退。 */
+    function curMode() { return modeOf(save.mode || 'casual'); }
+    function setMode(id) {
+      if (!MODE_BY_ID[id]) return false;
+      save.mode = id; persist(); return true;
+    }
+    /* 累计满星数：封面"精通度"与成就的长期指标。 */
+    function starsTotal() {
+      if (!save.stars) return 0;
+      let n = 0;
+      for (const k in save.stars) if (save.stars.hasOwnProperty(k)) n += save.stars[k] | 0;
+      return n;
+    }
+    /* 本关上限心数 = 模式基础值 + 爱心罐头道具。
+     * 抽成函数是因为"关卡开始"和"广告复活补满"两处都要用同一个数，各写一份迟早会写歪。 */
+    function maxLives() { return curMode().lives + (equippedItem === 'heart' ? 1 : 0); }
+
     function addCoins(n) { save.coins = Math.max(0, (save.coins | 0) + Math.round(n || 0)); persist(); }
     function buyPart(slot) {
       if (!PART_BY_ID[slot]) return false;
@@ -613,11 +674,32 @@
     let revivesUsed = 0;
     let comboCount = 0;    // 连续无伤吃星
     let runClean = true;   // 意见②：本关是否一次都没受伤（完美通关攒房子）
-    let runScore = 0;      // 本关得分（评分系统）
+    let runScore = 0;      // 本关得分（评分系统，已含难度倍率）
+    let runScoreRaw = 0;   // 倍率前的原始得分（金币结算用，避免倍率被重复放大）
     let runCoins = 0;      // 本关结算获得的金币（结算界面展示 + 翻倍用）
     let runCoinsDoubled = false; // 本关金币是否已翻倍（防止重复刷同一个广告位）
     let runCombo = 0;      // 本关最大连击
     let runGrade = null;   // 本关评级 { g, color, label }（过关结算后写入）
+    /* 精通星级：每关最多 3 颗（通关 / 集齐礼物 / 无伤）。
+     * runStarsGot / runStarsTotal 是"本关实际吃到"与"本关共有"的礼物数，
+     * 判"集齐"必须用"实际 == 总数"而不是"吃了 3 个"—— 关卡礼物数会随难度变。 */
+    let runStars = 0;
+    let runStarsGot = 0;
+    let runStarsTotal = 0;
+    let runStarsNew = false;   // 本关星级是否刷新了最好成绩（结算页给个提示）
+    /* 无尽冲刺（老少咸宜的"成年人目标"）：没有终点，跑到跑不动为止。
+     * 与闯关模式共用同一套物理/碰撞/渲染，只在三处分流：
+     *   ① 地形不停向前延伸（见 extendEndless），不生成终点与礼物箱；
+     *   ② 难度由"跑了多远"驱动，而不是关卡号；
+     *   ③ 结算看"跑了多少米"，不看关卡。
+     * 这样无尽模式不需要复制一份游戏循环，所有已修好的手感与碰撞都自动继承。 */
+    let endlessMode = false;    // 本次跑关是否无尽模式
+    let endlessDist = 0;        // 已冲刺距离（米）—— 无尽模式的核心分数
+    let endlessGenX = 0;        // 地形已铺设到的世界坐标 x（续铺边界）
+    let endlessTier = 0;        // 当前难度档（0 起，随距离提升）
+    let endlessRock = 0;        // 已发放到的里程碑（每 100 米一档）
+    let endlessNewBest = false; // 本次是否刷新最远纪录（结算页提示用）
+    let lastMaxGap = 0;         // 最近一次生成使用的"最大缺口"上限（供调试/测试读取，避免测试重算公式）
     let dailyMode = false; // 每日挑战模式：用日期 seed 固定关卡
     let dailyKey = '';     // 今日日期 key（YYYYMMDD）
     let questRuns = 0;     // 本局累计通关次数（每日任务追踪）
@@ -665,12 +747,17 @@
     /* ---------- 背景装饰（视差层，世界坐标） ---------- */
     let backdrop = [];
     let sky = null;
+    /* 背景装饰的"循环跨度"。普通模式=关卡长度；无尽模式关卡无限延伸，
+     * 若继续拿 levelWidth 当跨度，装饰会被摊薄到几十万像素里直接看不见 ——
+     * 所以无尽模式锁一个固定跨度，让装饰在原地循环平铺。 */
+    let backdropSpan = 2600;
     function buildBackdrop() {
       backdrop = [];
+      backdropSpan = endlessMode ? 2400 : levelWidth + 400;
       const n = 26;
       for (let i = 0; i < n; i++) {
         backdrop.push({
-          x: rand(-200, levelWidth + 200),
+          x: rand(-200, backdropSpan),
           y: rand(WORLD_TOP_VIS(), GROUND_BASE - 40),
           r: rand(14, 46),
           p: rand(0.18, 0.45),      // 视差系数
@@ -689,9 +776,35 @@
       return v.vmax * (2 * v.jump / GRAVITY);
     }
 
+    /* ---------- 无尽冲刺：距离 ↔ 难度档 ---------- */
+    const ENDLESS_PX_PER_M = 50;    // 50 世界像素 = 1 米
+    const ENDLESS_AHEAD = 2600;     // 玩家前方至少保有这么多地形
+    const ENDLESS_CHUNK = 2200;     // 每次向前续铺的长度
+    const ENDLESS_MAX_TIER = 8;     // 难度档上限：再往上只加距离不加密度，避免出现无解地形
+    /* 距离 → 难度档：每 120 米一档。把这个档位当成"等效关卡号"喂给生成公式，
+     * 于是"新障碍随关数解锁""障碍越来越密"这些既有逻辑全部自动生效，
+     * 一行难度代码都不用另写。 */
+    function endlessTierOf(dist) {
+      return Math.min(ENDLESS_MAX_TIER, Math.floor((dist || 0) / 120));
+    }
+    function endlessTierLv() { return 1 + endlessTier; }
+    /* 里程从"出生点"起算，而不是世界坐标 0 点 —— 玩家出生在 x=90，
+     * 不减掉这段的话开局第一帧就显示"1 米"，像是白送了一米。 */
+    const ENDLESS_START_X = 90;
+    function endlessMeters() {
+      return player ? Math.floor(Math.max(0, player.x - ENDLESS_START_X) / ENDLESS_PX_PER_M) : 0;
+    }
+
     function generateLevel(lv) {
-      theme = THEMES[(lv - 1) % THEMES.length];
-      const baseVehicle = VEHICLES[(lv - 1) % VEHICLES.length];
+      const dm = curMode();          // 当前难度模式：缺口容错 / 障碍密度 / 心数都读它
+      /* 无尽模式：重置里程类状态（每次重开/复活重来都从 0 米、第 1 档开始），
+       * 并把"等效关卡号"换成距离档位 —— 下面所有难度公式读的都是 lvCurve。 */
+      const endless = !!endlessMode;
+      if (endless) { endlessTier = 0; endlessDist = 0; endlessRock = 0; endlessNewBest = false; }
+      const lvCurve = endless ? endlessTierLv() : lv;
+      theme = THEMES[(endless ? 0 : lv - 1) % THEMES.length];
+      // 无尽固定用基础载具：跑到一半偷偷换车会让手感突变（道具/零件加成照常生效）
+      const baseVehicle = endless ? VEHICLES[0] : VEHICLES[(lv - 1) % VEHICLES.length];
       // 道具载具：关卡难度（maxGap）永远按默认载具算，算完再换成玩家携带的载具。
       // 这样"更强的载具"只会让关卡更好过，绝不会生成跳不过去的坑 —— 道具是纯收益，
       // 也让平衡工作从"每个载具都要重新验证关卡"简化为一次性验证。
@@ -721,11 +834,13 @@
 
       // 意见④：路要很长——第 1 关约 3500px，之后每关 +300。
       // [PLACEHOLDER] 目标单局 30-60s，等 playtest 实测均速后回调。
-      levelWidth = 3200 + lv * 300;
+      // 无尽模式只需铺出开头一段，之后由 extendEndless() 无限续接
+      levelWidth = endless ? ENDLESS_CHUNK + 1200 : 3200 + lv * 300;
 
-      const maxGap = Math.floor(jumpDistance(baseVehicle) * 0.72);   // 留 28% 容错，点按跳也能过
+      const maxGap = Math.floor(jumpDistance(baseVehicle) * dm.margin);  // 容错率由模式定：休闲 28% / 挑战 20%
+      lastMaxGap = maxGap;
       const minGap = 62;
-      const gapChance = clamp(0.30 + lv * 0.015, 0.30, 0.50);
+      const gapChance = clamp(0.30 + lvCurve * 0.015 + dm.gap, 0.30, dm.gapMax);
 
       platforms = [];
       hazards = [];
@@ -733,6 +848,10 @@
       particles = [];
       floaters = [];
       runClean = true;             // 每次生成新关卡重置完美标记
+      runStarsGot = 0;             // 本关吃到的礼物数
+      runStarsTotal = 0;           // 本关礼物总数（下方生成礼物后回填）
+      runStars = 0;
+      runStarsNew = false;
       runScore = 0;                // 每次生成新关卡重置评分/连击/评级
       runCoins = 0;                // 本关金币结算重置
       runCoinsDoubled = false;     // 翻倍机会重置
@@ -747,7 +866,7 @@
       platforms.push({ x: 0, y: GROUND_BASE, w: START_W, h: PLAT_THICK, start: true });
       x = START_W;
 
-      while (x < levelWidth - END_W - 200) {
+      while (x < (endless ? levelWidth : levelWidth - END_W - 200)) {
         if (!lastWasGap && rng() < gapChance) {
           x += ri(minGap, maxGap);
           lastWasGap = true;
@@ -765,23 +884,34 @@
         platforms.push({ x: x, y: GROUND_BASE, w: 240, h: PLAT_THICK });
         x += 240;
       }
-      platforms.push({ x: x + 100, y: GROUND_BASE, w: END_W, h: PLAT_THICK, end: true });
-      levelWidth = x + 100 + END_W;
+      if (endless) {
+        /* 无尽：没有终点平台，也没有礼物箱。把"已铺到哪"记进 endlessGenX，
+         * 后续 extendEndless() 就顺着这个边界继续往前铺。 */
+        endlessGenX = x;
+        levelWidth = x + 600;
+        goal = null;
+      } else {
+        platforms.push({ x: x + 100, y: GROUND_BASE, w: END_W, h: PLAT_THICK, end: true });
+        levelWidth = x + 100 + END_W;
+      }
 
       // --- 5.2 障碍：只放在非起点/终点平台上，满足最小间距与边缘留白 ---
-      // 儿童向难度：障碍密度刻意压低、最小间距拉大，保证「看得清、躲得开」。
-      const avail = Math.max(600, levelWidth - START_W - END_W);
-      const spacing = clamp(360 - lv * 6, 240, 360);
-      const count = clamp(Math.round(avail / spacing), 4, 16);
-      const minSpacing = Math.max(230, spacing * 0.75);
+      // 休闲模式刻意压低密度、拉大最小间距（看得清、躲得开）；挑战模式则收紧。
+      const avail = Math.max(600, (endless ? endlessGenX : levelWidth) - START_W - END_W);
+      // 三个边界全部按模式取值：休闲档 = 改造前原值，挑战档才收紧（更密、更不留缝）
+      const spacing = clamp(360 - lvCurve * 6 + dm.spacingAdd, dm.spacingMin, dm.spacingMax);
+      const count = clamp(Math.round(avail / spacing), 4, dm.cap);
+      const minSpacing = Math.max(dm.minSpacingFloor, spacing * 0.75);
       // 意见④：难度分档——新障碍随关数逐步解锁（unlock 字段见 HAZARDS 定义）
-      const unlockedKeys = HAZARD_KEYS.filter(function (k) { return lv >= (HAZARDS[k].unlock || 0); });
+      const unlockedKeys = HAZARD_KEYS.filter(function (k) { return lvCurve >= (HAZARDS[k].unlock || 0); });
       const placed = [];
       let guard = 0;
       for (let i = 0; i < count && guard < count * 30; guard++) {
         const seg = platforms[ri(1, platforms.length - 2)];
         if (!seg || seg.start || seg.end) continue;
-        const margin = clamp(seg.w * 0.28, 100, 150);
+        // 留白按模式取值：这是"障碍能不能落上去"的准入门槛，比 spacing 更靠前，
+        // 只调 spacing 而不动这里，窄平台会先把障碍筛掉，密度根本提不上来。
+        const margin = clamp(seg.w * dm.hazMarginK, dm.hazMarginMin, dm.hazMarginMax);
         if (seg.w < margin * 2 + 60) continue;
         const hx = rand(seg.x + margin, seg.x + seg.w - margin);
         // 最小间距检查：避免障碍连体导致无解
@@ -806,19 +936,19 @@
         } else if (type === 'patrol') {
           obj.y = seg.y - def.h;
           obj.range = clamp(rand(50, Math.min(130, (seg.w - margin * 2) / 2)), 40, 130);
-          obj.spd = 1.1 + Math.min(lv * 0.045, 0.9);
+          obj.spd = 1.1 + Math.min(lvCurve * 0.045, 0.9);
           obj.baseX = hx;
         } else if (type === 'gate') {
           obj.y = seg.y - def.h;
         } else if (type === 'slider') {
           obj.range = rand(70, 130);
-          obj.spd = 1.3 + Math.min(lv * 0.04, 0.8);
+          obj.spd = 1.3 + Math.min(lvCurve * 0.04, 0.8);
           obj.baseY = seg.y - 44 - rand(20, 70);
           obj.y = obj.baseY;
         } else if (type === 'triGear') {
           // 意见④：上下往复移动的三角齿轮，悬空转着咬人，看准节奏从下面冲过去
           obj.range = rand(60, 110);
-          obj.spd = 1.1 + Math.min(lv * 0.05, 1.0);
+          obj.spd = 1.1 + Math.min(lvCurve * 0.05, 1.0);
           obj.baseY = seg.y - 46 - rand(20, 70);
           obj.y = obj.baseY;
           obj.spin = 2.8 * (rng() < 0.5 ? -1 : 1);
@@ -833,25 +963,37 @@
         i++;
       }
 
-      // --- 5.3 沿途小礼物：3 颗，避开障碍 ---
+      // --- 5.3 沿途小礼物：3 颗，落点取"离障碍最远"处（保证可安全获取）---
       const segs = platforms.slice(1, -1);
       const wantStars = 3;
       for (let i = 0; i < wantStars && segs.length; i++) {
         const idx = Math.floor((i + 0.5) / wantStars * segs.length);
         const seg = segs[Math.min(idx, segs.length - 1)];
         if (!seg) continue;
-        let sx = seg.x + seg.w * rand(0.3, 0.7);
-        let clash = false;
-        for (const h of hazards) {
-          if (Math.abs((h.baseX || h.x) - sx) < 80) { clash = true; break; }
+        /* 在段内扫描候选落点，选"到最近障碍距离最大"的那个。
+         * 不能沿用"发现太近就退回段中点"的老写法 —— 段中点自己也可能紧贴障碍
+         * （实测出现过礼物正好悬在尖刺正上方，想吃就必须挨一下）。
+         * 礼物现在绑着「集齐礼物」精通星，而受伤又会丢掉「无伤」星，
+         * 一旦礼物拿不到就是两颗星互斥 —— 所以落点必须保证"绝对不挨打也能拿"。 */
+        let sx = seg.x + seg.w * 0.5, bestClear = -1;
+        for (let t = 0.22; t <= 0.78; t += 0.04) {
+          const cand = seg.x + seg.w * t;
+          let nearest = 1e9;
+          for (const h of hazards) {
+            const d = Math.abs((h.baseX || h.x) + (h.w || 0) / 2 - cand);
+            if (d < nearest) nearest = d;
+          }
+          if (nearest > bestClear) { bestClear = nearest; sx = cand; }
         }
-        if (clash) sx = seg.x + seg.w * 0.5;
         stars.push({ x: sx, y: seg.y - 120, r: 16, bob: rand(0, 6.28), taken: false });
       }
+      runStarsTotal = stars.length;   // "集齐礼物"这颗星的判定基准
 
-      // --- 5.4 终点 ---
-      const endSeg = platforms[platforms.length - 1];
-      goal = { x: endSeg.x + endSeg.w * 0.5 - 26, y: endSeg.y - 74, w: 52, h: 52, bob: 0, taken: false };
+      // --- 5.4 终点（无尽模式没有终点，goal 保持 null）---
+      if (!endless) {
+        const endSeg = platforms[platforms.length - 1];
+        goal = { x: endSeg.x + endSeg.w * 0.5 - 26, y: endSeg.y - 74, w: 52, h: 52, bob: 0, taken: false };
+      }
 
       // --- 5.5 玩家 ---
       // 三心机制：撞到障碍/掉坑各扣 1 心，扣光才死亡（比一击死亡更宽容，利于留存）。
@@ -860,7 +1002,7 @@
         x: 90, y: startSeg.y - 50, w: 44, h: 50,
         vx: 0, vy: 0, onGround: false, dir: 1,
         animT: 0, invuln: 0, dead: false,
-        lives: (equippedItem === 'heart') ? 4 : 3,   // 道具「爱心罐头」多 1 条命
+        lives: maxLives(),                            // 模式基础心数（休闲 3 / 挑战 2）+ 爱心罐头道具
         landT: 0,                                    // 落地压扁动画计时
       };
       checkpoint = { x: 90, y: startSeg.y - 50 };
@@ -898,6 +1040,152 @@
       if (equippedItem === 'shield') shieldLeft = 1;
       else if (equippedItem === 'magnet') magnetLeft = 1500;
       else if (equippedItem === 'boost') boostLeft = 1200;
+    }
+
+    /* =========================================================================
+     * 5B. 无尽冲刺：前方续铺 + 里程碑
+     * ====================================================================== */
+    /* 前方地形续铺。核心约束只有一条 —— 玩家永远看得见前方有路。
+     * 为什么"边跑边铺"而不是"开局一次生成十万像素"：
+     *  ① 一次性铺满会让平台/障碍数组永久膨胀，而每帧要遍历它们做碰撞；
+     *  ② 预排的难度曲线跟不上玩家真实进度，跑得快的会觉得太松、跑得慢的会被突然卡死。
+     * 边跑边铺则天然只保留玩家附近的地形，难度也总能跟着当前里程走。 */
+    function extendEndless() {
+      if (!endlessMode || !player || state !== 'playing') return;
+      if (player.x + ENDLESS_AHEAD < endlessGenX) return;   // 前方还够跑，不用铺
+      const dm = curMode();
+      const baseVehicle = VEHICLES[0];
+      const maxGap = Math.floor(jumpDistance(baseVehicle) * dm.margin);
+      lastMaxGap = maxGap;
+      const minGap = 62;
+      const lvCurve = endlessTierLv();
+      const gapChance = clamp(0.30 + lvCurve * 0.015 + dm.gap, 0.30, dm.gapMax);
+      const spacing = clamp(360 - lvCurve * 6 + dm.spacingAdd, dm.spacingMin, dm.spacingMax);
+      const minSpacing = Math.max(dm.minSpacingFloor, spacing * 0.75);
+
+      /* --- 地形：从上一块平台的右边缘继续往前 --- */
+      const last = platforms[platforms.length - 1];
+      let x = last.x + last.w, lastY = last.y, lastWasGap = false;
+      const target = endlessGenX + ENDLESS_CHUNK;
+      const newSegs = [];
+      while (x < target) {
+        if (!lastWasGap && rng() < gapChance) {
+          x += ri(minGap, maxGap);
+          lastWasGap = true;
+        } else {
+          const w = ri(240, 460);
+          const y = clamp(lastY + ri(-58, 58), GROUND_BASE - 68, GROUND_BASE);
+          const seg = { x: x, y: y, w: w, h: PLAT_THICK };
+          platforms.push(seg); newSegs.push(seg);
+          lastY = y; x += w; lastWasGap = false;
+        }
+      }
+      // 停在缺口上就补一段短平台：否则"缺口 + 下一段续铺的起点"会拼成跨不过去的死路
+      if (lastWasGap) {
+        const seg = { x: x, y: GROUND_BASE, w: 240, h: PLAT_THICK };
+        platforms.push(seg); newSegs.push(seg);
+        x += 240;
+      }
+      endlessGenX = x;
+      levelWidth = x + 600;
+
+      /* --- 障碍：规则与 generateLevel 完全一致，只是作用在新铺的这段上 --- */
+      if (newSegs.length) {
+        const avail = Math.max(400, target - (last.x + last.w));
+        const count = clamp(Math.round(avail / spacing), 2, dm.cap);
+        const unlocked = HAZARD_KEYS.filter(function (k) { return lvCurve >= (HAZARDS[k].unlock || 0); });
+        let guard = 0;
+        for (let i = 0; i < count && guard < count * 30; guard++) {
+          const seg = newSegs[ri(0, newSegs.length - 1)];
+          if (!seg) continue;
+          const margin = clamp(seg.w * dm.hazMarginK, dm.hazMarginMin, dm.hazMarginMax);
+          if (seg.w < margin * 2 + 60) continue;
+          const hx = rand(seg.x + margin, seg.x + seg.w - margin);
+          // 最小间距检查跨"整局"做（扫全部障碍）：只看本段的话，段与段的交界处会连体
+          let ok = true;
+          for (const h of hazards) {
+            if (Math.abs((h.baseX || h.x) - hx) < minSpacing) { ok = false; break; }
+          }
+          if (!ok) continue;
+
+          const type = pick(unlocked);
+          const def = HAZARDS[type];
+          const obj = { type: type, x: hx, y: seg.y, t: rand(0, 6), phase: rand(0, 6.28), baseY: seg.y };
+          if (def.cycle !== undefined) obj.cycle = def.cycle;
+          if (def.r) { obj.r = def.r; obj.w = def.r * 2; obj.h = def.r * 2; }
+          else { obj.w = def.w; obj.h = def.h; }
+          if (type === 'gear' || type === 'saw') {
+            obj.y = seg.y - def.r * 2 + 8;
+            obj.spin = (type === 'gear' ? 1.6 : 5.2) * (rng() < 0.5 ? -1 : 1);
+          } else if (type === 'patrol') {
+            obj.y = seg.y - def.h;
+            obj.range = clamp(rand(50, Math.min(130, (seg.w - margin * 2) / 2)), 40, 130);
+            obj.spd = 1.1 + Math.min(lvCurve * 0.045, 0.9);
+            obj.baseX = hx;
+          } else if (type === 'slider') {
+            obj.range = rand(70, 130);
+            obj.spd = 1.3 + Math.min(lvCurve * 0.04, 0.8);
+            obj.baseY = seg.y - 44 - rand(20, 70);
+            obj.y = obj.baseY;
+          } else if (type === 'triGear') {
+            obj.range = rand(60, 110);
+            obj.spd = 1.1 + Math.min(lvCurve * 0.05, 1.0);
+            obj.baseY = seg.y - 46 - rand(20, 70);
+            obj.y = obj.baseY;
+            obj.spin = 2.8 * (rng() < 0.5 ? -1 : 1);
+          } else {
+            obj.y = seg.y - def.h;
+          }
+          hazards.push(obj);
+          i++;
+        }
+      }
+
+      /* --- 礼物：每段续铺补 1 颗，落点沿用"最大净空"扫描（保证不挨打也拿得到）--- */
+      if (newSegs.length) {
+        const seg = newSegs[ri(0, newSegs.length - 1)];
+        let sx = seg.x + seg.w * 0.5, bestClear = -1;
+        for (let t = 0.22; t <= 0.78; t += 0.04) {
+          const cand = seg.x + seg.w * t;
+          let nearest = 1e9;
+          for (const h of hazards) {
+            const d = Math.abs((h.baseX || h.x) + (h.w || 0) / 2 - cand);
+            if (d < nearest) nearest = d;
+          }
+          if (nearest > bestClear) { bestClear = nearest; sx = cand; }
+        }
+        stars.push({ x: sx, y: seg.y - 120, r: 16, bob: rand(0, 6.28), taken: false });
+      }
+    }
+
+    /* 里程推进：每 100 米一次小奖励，每 300 米补 1 颗心，每 120 米升一档难度。
+     * 为什么要"周期性补心"：无尽模式掉一颗心就永久少一颗，长距离奔跑会被慢慢磨死，
+     * 玩家感受到的是"运气不好"而不是"我还能更强"。定时补心把长跑曲线拉平，
+     * 让真正决定成绩的变成操作稳定性 —— 这才是成人玩家愿意反复刷的那种难度。 */
+    function endlessProgress() {
+      const m = endlessMeters();
+      endlessDist = m;
+      const tier = endlessTierOf(m);
+      if (tier !== endlessTier) {
+        endlessTier = tier;
+        theme = THEMES[tier % THEMES.length];   // 越跑风景越不同（六种主题循环）
+        sky = null;                             // 换主题必须重建天空渐变缓存
+        buildBackdrop();
+        if (tier > 0) { toast('🚩 ' + (tier * 120) + ' 米！赛道升级：' + theme.name); sfx.play('rev'); }
+      }
+      while (endlessRock + 100 <= m) {
+        endlessRock += 100;
+        const gain = Math.max(5, Math.round(12 * partBonus().coin * curMode().coin));
+        runCoins += gain;
+        runGifts += 2;
+        if (endlessRock % 300 === 0 && player.lives < maxLives()) player.lives++;
+        sfx.play('coin');
+        spawnBurst(player.x + player.w / 2, player.y, '#ffd24a', 18);
+        pushFloater(player.x, player.y - 34, endlessRock + 'm ！ 🪙+' + gain, '#ffd24a');
+        bannerMsg = '🚩 ' + endlessRock + ' 米里程碑 · 🪙+' + gain;
+        bannerT = 1.6;
+      }
+      extendEndless();
     }
 
     /* =========================================================================
@@ -1063,6 +1351,7 @@
         if (s.taken) continue;
         if (aabb(p.x, p.y, p.w, p.h, s.x - s.r, s.y - s.r, s.r * 2, s.r * 2)) {
           s.taken = true;
+          runStarsGot++;             // 精通星级：集齐礼物判定用
           comboCount++;
           runCombo = Math.max(runCombo, comboCount);
           const gain = 1;
@@ -1085,14 +1374,17 @@
         }
       }
 
-      /* --- 终点 --- */
-      if (!goal.taken && aabb(p.x, p.y, p.w, p.h, goal.x, goal.y, goal.w, goal.h)) {
+      /* --- 终点（无尽模式 goal 恒为 null，这里自然跳过）--- */
+      if (goal && !goal.taken && aabb(p.x, p.y, p.w, p.h, goal.x, goal.y, goal.w, goal.h)) {
         goal.taken = true;
         onCleared();
         return;
       }
 
       stepParticles();
+
+      /* --- 无尽冲刺：里程 / 里程碑奖励 / 前方地形续铺 --- */
+      if (endlessMode) endlessProgress();
 
       /* --- 相机 --- */
       const targetX = p.x - view.w * 0.35;
@@ -1175,7 +1467,20 @@
       vibrate(140);
       spawnBurst(player.x + player.w / 2, player.y + player.h / 2, pet.color, 30);
       save.runs = (save.runs | 0) + 1;
-      if (level > (save.best | 0)) save.best = level;
+      if (endlessMode) {
+        /* 无尽结算：距离就是分数，按距离发金币（无尽模式的主要产出）。
+         * 金币 = 距离 × 0.8 × 零件加成 × 难度倍率 —— 让"跑得远"直接等于"赚得多"。
+         * 这条正循环是把成年玩家留在游戏里的关键：挑战模式还额外享受 2× 激励。 */
+        endlessDist = endlessMeters();
+        endlessNewBest = endlessDist > (save.endlessBest | 0);
+        if (endlessNewBest) save.endlessBest = endlessDist;
+        runCoins += Math.round(endlessDist * 0.8 * partBonus().coin * curMode().coin);
+        addCoins(runCoins);
+        if (endlessDist >= 300) unlockAchievement('endless300');
+        if (endlessDist >= 1000) unlockAchievement('endless1000');
+      } else if (level > (save.best | 0)) {
+        save.best = level;
+      }
       save.gifts = (save.gifts | 0) + runGifts;
       if ((save.runs | 0) >= 20) unlockAchievement('play20');
       persist();
@@ -1194,8 +1499,27 @@
       // 评分结算：通关 100 + 无伤 50，加上吃星/连击分 → 映射评级
       runScore += 100;
       if (runClean) runScore += 50;
+      /* 顺序很关键：先按"原始表现"评级，再乘难度倍率。
+       * 反过来的话，挑战模式的 2× 会把 B 级表现灌水成 S 级，评级就失去意义了。 */
       runGrade = gradeFor(runScore);
+      const dmC = curMode();
+      runScoreRaw = runScore;
+      runScore = Math.round(runScore * dmC.score);
       if (runScore > (save.bestScore | 0)) save.bestScore = runScore;
+
+      /* ---------- 精通星级结算 ----------
+       * 三颗星对应三种"玩得更好"的方式，覆盖三种不同的动机：
+       *  ① 通关    —— 保底正反馈，人人有份
+       *  ② 集齐礼物 —— 奖励愿意探索路线的玩家（吃满才给）
+       *  ③ 无伤    —— 奖励操作精度，是纯度最高的技巧证明
+       * 只增不减（存历史最好）：星级是"我达成过"，不该被后来的失误抹掉。 */
+      runStars = 0;
+      if (runStarsTotal > 0 && runStarsGot >= runStarsTotal) runStars = 2;
+      else runStars = 1;
+      if (runClean) runStars++;      // 通关星 + 集齐星 + 无伤星，最多 3
+      const prevBestStar = save.stars[level] | 0;
+      runStarsNew = runStars > prevBestStar;
+      if (runStarsNew) save.stars[level] = runStars;
       // 每日挑战：记录今日最佳
       if (dailyMode) save.dailyBest[dailyKey] = Math.max(save.dailyBest[dailyKey] || 0, runScore);
       // 排行榜：本地 top10（分数/关卡/宠物）
@@ -1246,7 +1570,7 @@
        * 两部分：跑关过程里吃星实时攒的（runCoins）+ 通关奖励。
        * 通关奖励让"跑得干净 / 评价高"直接等于"更多金币"，把玩家往更好的表现推；
        * 整体再乘氮气零件的金币加成，让"升级 → 收益更高"这条循环真正闭环。 */
-      runCoins += Math.round((runScore * 1.0 + level * 20) * partBonus().coin);
+      runCoins += Math.round((runScoreRaw * 1.0 + level * 20) * partBonus().coin * curMode().coin);
       addCoins(runCoins);
       persist();
     }
@@ -1255,7 +1579,7 @@
       if (state !== 'dead' || revivesUsed >= 2) return;
       const cb = function (ok) {
         if (!ok) { toast('广告未看完，复活失败'); return; }
-        player.lives = 3;              // 看广告复活：满血继续本关
+        player.lives = maxLives();     // 看广告复活：按当前模式补满
         player.dead = false;
         revivesUsed++;
         runClean = false;
@@ -1264,7 +1588,7 @@
         state = 'playing';
         sfx.play('rev');
         startBgm();
-        toast('复活成功！继续闯关');
+        toast(endlessMode ? '复活成功！继续冲刺' : '复活成功！继续闯关');
       };
       ads.showRewarded('revive', cb);
     }
@@ -1307,7 +1631,7 @@
     }
 
     /* =========================================================================
-     * 8.5 汪汪队萌系角色库（纯 Canvas 手绘，替代 emoji）
+     * 8.5 萌系角色库（纯 Canvas 手绘，替代 emoji）
      * 每只宠物 = 大头 Q 版 + 小身体；载具 = 彩色圆润小车。
      * ====================================================================== */
     const ART = {};
@@ -1797,8 +2121,97 @@
       }
     };
 
+    /* ---------- 零件等级 → 载具外观成长（借鉴《合成竞速之王》） ---------- */
+    function drawPartGlow(g, t) {
+      const power = garagePower();
+      if (!power) return;            // 素车：一点装饰都不加
+      const lv = {};
+      for (const s of PART_SLOTS) lv[s.id] = partBestLv(s.id);
+
+      /* ① 氮气：尾部火焰（车尾，即 -x 侧 —— 放大截图确认宠物脸朝 +x，
+       * 所以"后方"是 -x。方向搞反会变成车头喷火）。长度随等级增长。 */
+      const nlv = lv.nitro || 0;
+      if (nlv > 0) {
+        const len = 9 + nlv * 5.2;
+        const fl = 0.72 + Math.sin(t * 26) * 0.28;
+        const layers = [
+          ['rgba(255,225,110,0.95)', 1.00],
+          ['rgba(255,150,50,0.82)',  0.70],
+          ['rgba(255,80,45,0.55)',   0.44],
+        ];
+        for (const L of layers) {
+          const col = L[0], k = L[1];
+          g.fillStyle = col;
+          g.beginPath();
+          g.moveTo(-16, -13);
+          g.quadraticCurveTo(-16 - len * k * fl, -13 - 5 * k, -16 - len * k * fl * 1.2, -9);
+          g.quadraticCurveTo(-16 - len * k * fl, -5 + 5 * k, -16, -5);
+          g.closePath(); g.fill();
+        }
+      }
+
+      // ② 发动机：排气管，挂在车尾（-x），每 2 级多一根（最多 3 根）
+      const elv = lv.engine || 0;
+      if (elv > 0) {
+        const pipes = Math.min(3, Math.ceil(elv / 2));
+        for (let i = 0; i < pipes; i++) {
+          const px = -22 - i * 2.5, py = -21 - i * 2.4;
+          g.fillStyle = '#8a9099';
+          g.beginPath();
+          if (g.roundRect) g.roundRect(px, py, 11, 3.4, 1.7); else g.rect(px, py, 11, 3.4);
+          g.fill();
+          g.fillStyle = '#dfe6ee';
+          g.beginPath(); g.arc(px - 0.4, py + 1.7, 1.9, 0, 6.283); g.fill();
+        }
+      }
+
+      // ③ 车架：底盘装甲板，2 级起出现，宽度随等级增加
+      const clv = lv.chassis || 0;
+      if (clv >= 2) {
+        const w = 18 + clv * 3.4;
+        g.fillStyle = 'rgba(46,52,62,0.92)';
+        g.beginPath();
+        if (g.roundRect) g.roundRect(-w / 2, -3.4, w, 5, 2.5); else g.rect(-w / 2, -3.4, w, 5);
+        g.fill();
+        g.strokeStyle = 'rgba(255,210,74,0.5)'; g.lineWidth = 1;
+        g.beginPath(); g.moveTo(-w / 2 + 3, -1); g.lineTo(w / 2 - 3, -1); g.stroke();
+      }
+
+      // ④ 轮胎：轮毂反光圈，2 级起出现，亮度随等级提升
+      const tlv = lv.tires || 0;
+      if (tlv >= 2) {
+        g.strokeStyle = 'rgba(255,255,255,' + Math.min(0.9, 0.22 + tlv * 0.13).toFixed(2) + ')';
+        g.lineWidth = 1.9;
+        for (const wx of [-15, 15]) { g.beginPath(); g.arc(wx, -7, 3.5, 0, 6.283); g.stroke(); }
+      }
+
+      // ⑤ 悬挂：轮上弹簧，2 级起出现（黄色小折线）
+      const slv = lv.suspension || 0;
+      if (slv >= 2) {
+        g.strokeStyle = '#ffd24a'; g.lineWidth = 1.5;
+        for (const wx of [-15, 15]) {
+          g.beginPath();
+          for (let i = 0; i <= 4; i++) {
+            const yy = -21 + i * 2.1;
+            const xx = wx + (i % 2 ? 2.6 : -2.6);
+            if (i === 0) g.moveTo(xx, yy); else g.lineTo(xx, yy);
+          }
+          g.stroke();
+        }
+      }
+
+      // ⑥ 总强度光晕：车库越强，车身外圈越亮 —— 一眼看出"这辆车改装过"
+      if (power >= 6) {
+        g.strokeStyle = 'rgba(255,210,74,' + Math.min(0.46, 0.055 * power).toFixed(2) + ')';
+        g.lineWidth = 2.6;
+        g.beginPath(); g.ellipse(0, -14, 29, 17.5, 0, 0, 6.283); g.stroke();
+      }
+    }
+
     /* ---------- 5 种载具画师（translate 到车底中心 (0,0) 上表面向上） ---------- */
     function drawVehicleShape(g, vid, accent) {
+      // 零件装饰先画 → 火焰/装甲/光晕都在车身下层，不会糊住车体轮廓
+      drawPartGlow(g, g.__vt || 0);
       const runL = Math.sin(g.__vt * 22) * 0.9;
       if (vid === 'escooter') {
         // 前后轮
@@ -2041,8 +2454,8 @@
       for (const b of backdrop) {
         const sx = b.x - cameraX * b.p;
         const sy = b.y - cy * b.p * 0.5 + view.h * 0.12;
-        // 水平循环
-        const span = levelWidth + 400;
+        // 水平循环（跨度见 buildBackdrop：普通=关卡长度，无尽=固定跨度）
+        const span = backdropSpan;
         let mx = ((sx % span) + span) % span - 200;
         if (mx < -80 || mx > view.w + 80) continue;
         if (sy < -80 || sy > view.h + 80) continue;
@@ -2576,7 +2989,7 @@
       panel(12, 12, 214, 46, 23);
       ctx.font = 'bold 17px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText('第 ' + level + ' 关', 26, 35);
+      ctx.fillText(endlessMode ? ('无尽 ' + endlessDist + 'm') : ('第 ' + level + ' 关'), 26, 35);
       heartRow(92, 35, player ? player.lives : 3, 19);
       const mutedOn = sfx.isMuted && sfx.isMuted();
       ctx.globalAlpha = mutedOn ? 0.55 : 1;
@@ -2631,13 +3044,29 @@
       ctx.fillText('🪙' + runCoins, w - 128 + 39, 66 + 17);
       ctx.textAlign = 'left';
 
+      /* 难度徽章：紧贴金币面板左侧（进度条右端 w-264 之外，不会打架）。
+       * 常驻显示的意义：难度是玩家自己选的，必须随时知道自己在哪一档，
+       * 否则"我选了挑战怎么没感觉"——选择不反馈，选择就白选了。 */
+      const dmb = curMode();
+      const badgeX = w - 214, badgeW = 78;
+      panel(badgeX, 66, badgeW, 32, 16);
+      ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = dmb.id === 'pro' ? '#ff9f43' : 'rgba(255,255,255,0.82)';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(dmb.icon + dmb.name, badgeX + badgeW / 2, 66 + 17);
+      ctx.textAlign = 'left';
+
       // 顶部进度条（胶囊 + 光泽）
       const bx = 232, bw = Math.max(120, w - 496), by = 35;
       ctx.fillStyle = 'rgba(255,255,255,0.22)';
       roundRect(bx - 2, by - 9, bw + 4, 18, 9); ctx.fill();
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       roundRect(bx, by - 7, bw, 14, 7); ctx.fill();
-      const prog = player ? clamp(player.x / levelWidth, 0, 1) : 0;
+      /* 无尽模式没有终点，进度条改成"离下一个 100 米里程碑还有多远" ——
+       * 否则一条永远卡在 0% 的进度条只会让玩家以为游戏坏了。 */
+      const prog = endlessMode
+        ? ((endlessDist % 100) / 100)
+        : (player ? clamp(player.x / levelWidth, 0, 1) : 0);
       if (prog > 0.01) {
         const grd = ctx.createLinearGradient(bx, by - 7, bx, by + 7);
         grd.addColorStop(0, '#ffd24a'); grd.addColorStop(0.5, '#ffb52e'); grd.addColorStop(1, '#ff8a3c');
@@ -2646,11 +3075,20 @@
         ctx.fillStyle = 'rgba(255,255,255,0.5)';
         roundRect(bx + 4, by - 5, Math.max(2, bw * prog - 8), 4, 2); ctx.fill();
       }
-      // 终点旗帜标记
-      ctx.fillStyle = 'rgba(255,255,255,0.8)';
-      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx + bw - 3, by - 13, 6, 26, 3) : ctx.rect(bx + bw - 3, by - 13, 6, 26); ctx.fill();
-      ctx.fillStyle = '#ffd24a';
-      ctx.beginPath(); ctx.moveTo(bx + bw - 3, by - 13); ctx.lineTo(bx + bw - 18, by - 9); ctx.lineTo(bx + bw - 3, by - 5); ctx.closePath(); ctx.fill();
+      if (endlessMode) {
+        // 无尽模式条尾换成"下一里程碑"数字，明确告诉玩家这条进度条在量什么
+        ctx.fillStyle = '#ffd24a';
+        ctx.font = 'bold 10px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+        ctx.fillText((endlessRock + 100) + 'm', bx + bw, by - 17);
+        ctx.textAlign = 'left';
+      } else {
+        // 终点旗帜标记
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx + bw - 3, by - 13, 6, 26, 3) : ctx.rect(bx + bw - 3, by - 13, 6, 26); ctx.fill();
+        ctx.fillStyle = '#ffd24a';
+        ctx.beginPath(); ctx.moveTo(bx + bw - 3, by - 13); ctx.lineTo(bx + bw - 18, by - 9); ctx.lineTo(bx + bw - 3, by - 5); ctx.closePath(); ctx.fill();
+      }
     }
 
     /* ---------- 触屏按键布局 ---------- */
@@ -2752,7 +3190,7 @@
       } else if (state === 'paused') {
         btn(w / 2 - 110, h * 0.55, 220, 54, '继续游戏', 'resume');
         btn(w / 2 - 110, h * 0.55 + 68, 220, 48, (sfx.isMuted && sfx.isMuted()) ? '🔇 声音：关' : '🔊 声音：开', 'music', true);
-        btn(w / 2 - 110, h * 0.55 + 128, 220, 48, '重新开始本关', 'restart', true);
+        btn(w / 2 - 110, h * 0.55 + 128, 220, 48, endlessMode ? '重新开始冲刺' : '重新开始本关', 'restart', true);
         btn(w / 2 - 110, h * 0.55 + 188, 220, 48, '返回首页', 'home', true);
       } else if (state === 'dead') {
         // 三心时代：看广告满血复活（最多 2 次）+ 再来一次本关 + 回首页
@@ -2827,9 +3265,12 @@
     function coverGrid() {
       const w = view.w, h = view.h;
       const topY = view.portrait ? h * 0.16 : h * 0.15;
-      const gs = view.portrait ? Math.min(96, (w - 60) / 3) : 92;
+      // 横屏网格缩到 78：横屏画布仅 506 高，92×3 行 + 底部信息行会顶出屏幕
+      const gs = view.portrait ? Math.min(96, (w - 60) / 3) : 78;
       const gx = w / 2 - (3 * gs + 2 * 12) / 2;
-      const gy = topY + 70;
+      /* +88 / +74 而不是原来的 +70：网格底板从 gy-12 起画，用 70 时底板顶边
+       * 正好压住 topY+58 的副标题。多留出的这段就是给副标题的呼吸位。 */
+      const gy = topY + (view.portrait ? 88 : 74);
       return { gs: gs, gx: gx, gy: gy };
     }
     /* 封面「工坊 + 离线收益」两张卡片的几何。
@@ -2862,6 +3303,22 @@
         garageY: top, garageH: gh,
         idleY: top + gh + 8, idleH: ih,
       };
+    }
+
+    /* 无尽冲刺按钮几何：横竖屏各挑一块确定不会撞车的空地。
+     *  竖屏 → 左侧纵列（段位/难度/携带/精通 四枚胶囊之下、宠物网格底板之上）；
+     *  横屏 → 宠物网格正下方那条横带（网格左侧被工坊卡占着，只能往下走）。
+     * 绘制端与热区端共用这一个函数 —— 分头各算一遍是"画的和点的对不上"的经典来源。 */
+    function endlessBtnRect() {
+      const w = view.w, h = view.h;
+      if (view.portrait) {
+        // 胶囊纵列最底那枚（精通）结束于 y=148，这里留 10px 呼吸位
+        return { x: 14, y: 158, w: 214, h: 36 };
+      }
+      const grid = coverGrid();
+      let y = grid.gy + 3 * (grid.gs + 12) + 14;
+      y = Math.min(y, h - 12 - 46);
+      return { x: 14, y: y, w: 244, h: 46 };
     }
 
     /* 工坊卡片：按卡片高度自适应三档内容密度。
@@ -3005,11 +3462,36 @@
         { id: 'freeItem', label: '🎁 免费道具' },
         { id: 'bag', label: '🎒 背包 ' + (bagTotal() ? bagTotal() : '') },
       ];
-      const ex = w - 124, ey = h - 72;
-      for (let i = 0; i < entrys.length; i++) {
-        overlayButtons.push({ x: ex, y: ey - i * 54, w: 112, h: 44, label: entrys[i].label, id: entrys[i].id, secondary: true });
+      /* 竖屏：右侧单列 8 行（纵向空间充足）。
+       * 横屏：右侧双列 4 行 —— 横屏只有 506 逻辑高，单列 8×54=432px 会把最上面
+       * 的入口顶出屏幕（实测排行榜被切掉大半）。横屏宠物网格只占中间 258px 宽，
+       * 两侧都是空白，排两列绰绰有余。 */
+      if (view.portrait) {
+        const ex = w - 124, ey = h - 72;
+        for (let i = 0; i < entrys.length; i++) {
+          overlayButtons.push({ x: ex, y: ey - i * 54, w: 112, h: 44, label: entrys[i].label, id: entrys[i].id, secondary: true });
+        }
+      } else {
+        const colW = 112, colGap = 12, rowH = 52;
+        const rows = Math.ceil(entrys.length / 2);
+        const x0 = w - 124;                       // 靠右那列
+        const y0 = h - 52;                        // 从底部往上排
+        for (let i = 0; i < entrys.length; i++) {
+          const col = i % 2, row = Math.floor(i / 2);
+          overlayButtons.push({
+            x: x0 - col * (colW + colGap), y: y0 - (rows - 1 - row) * rowH,
+            w: colW, h: 44, label: entrys[i].label, id: entrys[i].id, secondary: true,
+          });
+        }
       }
       // 改装工坊 / 离线收益：热区与 drawCover 共用 coverCards 几何
+      // 难度模式切换（热区与 drawCover 左侧徽章共用几何：x=14, y=50, 140×30）
+      overlayButtons.push({ x: 14, y: 50, w: 140, h: 30, hidden: true, id: 'mode' });
+      /* 无尽冲刺入口：热区与 drawCover 共用 endlessBtnRect()。
+       * 这是"老少咸宜"的关键落点 —— 闯关模式有终点、有段落感，适合小孩与碎片时间；
+       * 无尽模式只有一个数字（跑了多远），适合愿意一遍遍刷纪录的成年玩家。 */
+      const er = endlessBtnRect();
+      overlayButtons.push({ x: er.x, y: er.y, w: er.w, h: er.h, hidden: true, id: 'endless' });
       const cc = coverCards(w, h);
       overlayButtons.push({ x: cc.x, y: cc.garageY, w: cc.w, h: cc.garageH, hidden: true, id: 'garage' });
       if (cc.idleH > 0 && idlePending().coins > 0) {
@@ -3063,7 +3545,7 @@
       ctx.font = '900 ' + size + 'px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.lineJoin = 'round';
-      // 白描边（汪汪队儿童节标志风）
+      // 白描边（统一的卡通描边风格）
       ctx.strokeStyle = 'rgba(255,255,255,0.92)';
       ctx.lineWidth = Math.max(5, size * 0.22);
       ctx.strokeText(text, cx, y + 1.5);
@@ -3086,11 +3568,13 @@
         const a = timeAcc * 0.4 + i * 2.1;
         ART.star(ctx, cx + Math.cos(a + i) * (150 + Math.sin(timeAcc * 0.8 + i) * 18), topY - 44 + Math.sin(a + i) * 26, 6 + (i % 3) * 2.2, i % 2 ? '#ffe082' : '#c9a4ff', 'rgba(255,255,255,0.8)');
       }
-      gradientTitle('宠物大冒险', cx, topY, view.portrait ? 40 : 48);
+      gradientTitle('疾风冲刺', cx, topY, view.portrait ? 40 : 48);
       ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.92)';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('选一只宠物，骑上载具，闯过 ' + THEMES.length + ' 大主题关卡', cx, topY + 58);
+      // 副标题写"点一下就开始"而不是"选一位伙伴"：玩家必须一眼知道下一步做什么，
+      // 尤其是不熟悉游戏的长辈 —— 把动作说出来，比描述游戏内容有用得多。
+      ctx.fillText('点一位伙伴，立即开始冲刺 · 共 ' + THEMES.length + ' 大主题', cx, topY + 58);
 
       /* 左上角信息胶囊：段位 + 下一关携带的道具
        * 为什么放左上而不是标题下方：宠物网格底板从 topY+58 就开始铺，标题以下的纵向
@@ -3123,11 +3607,32 @@
       }
       pillY += 36;
 
+      /* 难度模式切换（休闲 / 挑战）—— 整个"受众分层"的入口。
+       * 位置定在左侧纵列（段位胶囊下方）：这一列横竖屏都有余量，
+       * 不会被宠物网格、右侧入口列或右上角金币胶囊压住。
+       * （初版放在右上角，正好压在金币胶囊上，是个自查出来的碰撞。） */
+      const dmbC = curMode();
+      const mw = 140, mx = 14, my = pillY;
+      ctx.save();
+      ctx.fillStyle = dmbC.id === 'pro' ? 'rgba(122,52,8,0.78)' : 'rgba(10,8,18,0.55)';
+      roundRect(mx, my, mw, 30, 15); ctx.fill();
+      ctx.strokeStyle = dmbC.id === 'pro' ? '#ff9f43' : 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1.5;
+      roundRect(mx, my, mw, 30, 15); ctx.stroke();
+      ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = dmbC.id === 'pro' ? '#ffc078' : '#ffffff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(dmbC.icon + ' ' + dmbC.name + '模式' + (dmbC.score > 1 ? ' ×' + dmbC.score : ''),
+        mx + mw / 2, my + 15);
+      ctx.restore();
+      pillY += 36;
+
       const eqIt = ITEM_BY_ID[save.equipped];
       if (eqIt && bagCount(eqIt.id) > 0) {
         const eqTxt = '携带 ' + eqIt.name + ' ×' + bagCount(eqIt.id);
         ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
         const eqW = ctx.measureText(eqTxt).width + 44;
+        // pillY 此刻已越过「段位」和「难度」两枚胶囊，这里继续往下排即可
         ctx.fillStyle = 'rgba(10,8,18,0.55)';
         roundRect(14, pillY, eqW, 28, 14); ctx.fill();
         ctx.strokeStyle = 'rgba(255,210,74,0.9)'; ctx.lineWidth = 1.5;
@@ -3139,6 +3644,44 @@
         ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = '#ffd24a';
         ctx.fillText(eqTxt, 44, pillY + 14);
+        pillY += 34;
+      }
+
+      /* 精通度胶囊：累计满星数 —— 让"把每关打透"这件事在封面就看得见。
+       * 没有它，星级只是结算页一闪而过的装饰，成不了长期目标。
+       * 分母用「已通关卡数 × 3」而不是固定值：关卡是无尽的，固定分母迟早被超出。 */
+      const clearedLv = Math.max(1, (save.best | 0) - 1);
+      const stTxt = '★ 精通 ' + starsTotal() + '/' + (clearedLv * 3);
+      ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+      const stW = ctx.measureText(stTxt).width + 26;
+      ctx.fillStyle = 'rgba(10,8,18,0.55)';
+      roundRect(14, pillY, stW, 28, 14); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,210,74,0.55)'; ctx.lineWidth = 1.5;
+      roundRect(14, pillY, stW, 28, 14); ctx.stroke();
+      ctx.fillStyle = '#ffd24a';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(stTxt, 27, pillY + 14);
+
+      /* 无尽冲刺入口。为什么放这一列而不是右侧入口列：
+       * 它是"玩法"，不是"功能面板" —— 与上面的段位/难度/精通同属"我这次怎么跑"；
+       * 混进右侧那一列（签到/宝箱/背包这类系统弹窗）会被当成又一个弹窗按钮。 */
+      {
+        const er = endlessBtnRect();
+        const eb = save.endlessBest | 0;
+        ctx.save();
+        const egr = ctx.createLinearGradient(er.x, er.y, er.x + er.w, er.y);
+        egr.addColorStop(0, 'rgba(255,138,60,0.92)');
+        egr.addColorStop(1, 'rgba(255,80,120,0.92)');
+        ctx.fillStyle = egr;
+        roundRect(er.x, er.y, er.w, er.h, er.h / 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.62)'; ctx.lineWidth = 1.5;
+        roundRect(er.x, er.y, er.w, er.h, er.h / 2); ctx.stroke();
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = 'bold ' + (view.portrait ? 14 : 16) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(eb > 0 ? ('♾ 无尽冲刺 · 最远 ' + eb + 'm') : '♾ 无尽冲刺',
+          er.x + er.w / 2, er.y + er.h / 2);
+        ctx.restore();
       }
 
       // 宠物网格（几何与 buildCoverButtons 共用 coverGrid）
@@ -3411,11 +3954,12 @@
     }
 
     function drawDead(w, h) {
-      gradientTitle('失败啦…', w / 2, h * 0.30, 38);
+      gradientTitle(endlessMode ? '冲刺结束…' : '失败啦…', w / 2, h * 0.30, 38);
       ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.86)';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('坚持到第 ' + level + ' 关', w / 2, h * 0.30 + 34);
+      ctx.fillText(endlessMode ? ('本次冲刺 ' + endlessDist + ' 米')
+                              : ('坚持到第 ' + level + ' 关'), w / 2, h * 0.30 + 34);
       // 宠物小头像
       drawPetWithEq(pet.id, ctx, w / 2, h * 0.30 + 64, 0.62, 1, timeAcc, false);
       ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
@@ -3423,7 +3967,14 @@
       drawGiftIconSmall(ctx, w / 2 - 64, h * 0.30 + 82, 13);
       ctx.textAlign = 'left';
       ctx.fillText('本次收集 ' + runGifts + (revivesUsed < 2 ? '　·　还可复活 ' + (2 - revivesUsed) + ' 次' : ''), w / 2 - 44, h * 0.30 + 82);
-      if (level >= (save.best | 0)) {
+      if (endlessMode) {
+        // 最远纪录常驻显示：无尽模式的长期目标就是这个数字，不看到它就没有刷的动力
+        ctx.fillStyle = endlessNewBest ? '#ffd24a' : 'rgba(255,255,255,0.72)';
+        ctx.font = (endlessNewBest ? '900 17px ' : 'bold 14px ') + '"PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(endlessNewBest ? '🏆 新纪录！' : '最远纪录 ' + (save.endlessBest | 0) + ' 米',
+          w / 2, h * 0.30 + 104);
+      } else if (level >= (save.best | 0)) {
         ctx.fillStyle = '#ffd24a';
         ctx.font = '900 17px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.textAlign = 'center';
@@ -3459,14 +4010,42 @@
       ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = gr.color;
       ctx.fillText(gr.label + (runScore >= (save.bestScore | 0) ? ' · 新纪录！' : ''), cx - 24, topY + 58);
-      // 关卡信息
+      // 关卡信息并到评级标签右侧，竖屏把 topY+78 整行留白给星级（避免行距过密）
       ctx.textAlign = 'center';
-      ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.86)';
       ctx.fillText('第 ' + level + ' 关 · ' + theme.name, cx, topY + 78);
 
+      /* 三颗星：用图形而不是文字表达成绩 —— 三星是通用视觉语言，
+       * 不需要任何说明，点亮几颗就是本关最好成绩。
+       *
+       * 位置按屏幕方向分流，因为两个方向的余量天差地别：
+       *  · 竖屏：画在 h*0.50 的空白带（横带之下、按钮之上），一字排开够醒目
+       *  · 横屏：内联到评级行右侧 —— 横屏内容区只有约 177px 高，塞不下一整行；
+       *          但宽度有富余，往右排正好利用了横向空间 */
+      const starGap = 46, starR = 16;
+      const starY = view.portrait ? Math.round(h * 0.50) : (topY + 44);
+      const starCx = view.portrait ? cx : (cx + 132);
+      for (let i = 0; i < 3; i++) {
+        const on = i < (runStars | 0);
+        const pulse = on ? 1 + Math.sin(timeAcc * 4 + i) * 0.06 : 1;
+        ctx.save();
+        ctx.translate(starCx + (i - 1) * starGap, starY);
+        ctx.scale(pulse, pulse);
+        ART.star(ctx, 0, 0, starR,
+          on ? '#ffd24a' : 'rgba(255,255,255,0.14)',
+          on ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.3)');
+        ctx.restore();
+      }
+      if (runStarsNew) {
+        ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.fillStyle = '#9af29a';
+        ctx.textAlign = 'center';
+        ctx.fillText('精通度提升！', starCx, starY + 26);
+      }
+
       // ---- 横带：左半是宠物+载具立绘，右半是本关礼物与掉落道具 ----
-      const bandY = topY + 112;
+      const bandY = topY + 112;   // 星级不在这条线上（见下方按方向分流），横带保持原位
       drawPetWithEq(pet.id, ctx, cx - 122, bandY - 2, 0.62, 1, timeAcc, false);
       ART.drawVehicle(vehicle.id, ctx, cx - 86, bandY + 16, 0.8, vehicle.accent, timeAcc);
       // 礼物计数
@@ -3559,7 +4138,10 @@
       ctx.fillText('已解锁 ' + got + ' / ' + ACHIEVEMENTS.length, w / 2, h * 0.24);
       const cols = 2;
       const cw = Math.min(w - 48, 560) / cols - 8;
-      const ch = 74;
+      /* 卡片高度按条数自适应：成就从 8 条加到 10 条后，固定 74 会在横屏
+       * （画布仅 506 高）把最后一行顶出屏幕 —— 让高度去服从可用空间。 */
+      const rows = Math.ceil(ACHIEVEMENTS.length / cols);
+      const ch = clamp(Math.min(74, (h - h * 0.30 - 90) / rows - 10), 44, 74);
       for (let i = 0; i < ACHIEVEMENTS.length; i++) {
         const a = ACHIEVEMENTS[i];
         const c = i % cols, r = Math.floor(i / cols);
@@ -3579,10 +4161,10 @@
         ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'left';
-        ctx.fillText(a.name, bx + 50, by + 24);
+        ctx.fillText(a.name, bx + 50, by + ch * 0.32);
         ctx.font = '11px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = 'rgba(255,255,255,0.62)';
-        ctx.fillText(a.desc, bx + 50, by + 46);
+        ctx.fillText(a.desc, bx + 50, by + ch * 0.62);
         ctx.restore();
       }
     }
@@ -3967,7 +4549,10 @@
       //   无 HUD 的界面（封面/结算）→ 直接占顶部。结算界面必须走顶部——它的
       //     「关卡通过！」大标题就在 0.20 高度，提示条若还停在中间会正好盖住标题。
       const hasHud = !isMenuState(state) && state !== 'room' && state !== 'cleared';
-      const ty = hasHud ? 112 : 22;
+      /* 封面竖屏要再往下让一让：y=22 会横穿右上角的金币胶囊（y=14~44）。
+       * 竖屏封面在胶囊下方、标题上方有一段空白，正好收留提示条；
+       * 横屏高度太紧没有这段空白，维持原位。 */
+      const ty = hasHud ? 112 : ((state === 'cover' && view.portrait) ? 70 : 22);
       ctx.fillStyle = 'rgba(18,14,28,0.86)';
       roundRect(w / 2 - tw / 2, ty, tw, 40, 20); ctx.fill();
       ctx.fillStyle = '#fff';
@@ -4109,6 +4694,17 @@
         return;
       }
       switch (id) {
+        case 'mode': {
+          const cur = curMode();
+          const nx = MODES[(MODES.indexOf(cur) + 1) % MODES.length];
+          setMode(nx.id);
+          sfx.play('click');
+          // 提示条刻意短：它在封面顶部居中，太长会横穿左上那枚「段位」胶囊。
+          // 详细的档位说明交给徽章本身和结算界面，不占提示条。
+          toast(nx.icon + ' ' + nx.name + '模式 · ' + nx.desc);
+          break;
+        }
+        case 'endless': startEndless(); break;
         case 'bag': state = 'bag'; sfx.play('click'); break;
         case 'pause':
           if (state === 'playing') { state = 'paused'; stopBgm(); sfx.play('click'); }
@@ -4120,6 +4716,7 @@
           state = 'cover'; runGifts = 0; revivesUsed = 0;
           petAction = ''; pendingUnlock = null; stopBgm();
           dailyMode = false; rng = Math.random;
+          endlessMode = false;   // 回首页即退出无尽模式，下次点宠物走正常闯关
           break;
         case 'scores': state = 'scores'; sfx.play('click'); break;
         case 'achievements': state = 'achievements'; sfx.play('click'); break;
@@ -4239,7 +4836,38 @@
     /* =========================================================================
      * 12. 流程控制
      * ====================================================================== */
+    /* 无尽冲刺开局。与 startRun 的差别只有三件事：
+     *   ① endlessMode = true —— 让 generateLevel 走"无终点"分支；
+     *   ② level 固定 1 —— 无尽没有关卡号，难度由距离驱动（见 endlessTierLv）；
+     *   ③ 清空里程 / 档位 / 里程碑状态。
+     * 其余（道具消耗、任务追踪、BGM）与普通开局完全一致，避免两套流程各自漂移。 */
+    function startEndless() {
+      endlessMode = true;
+      level = 1;
+      runGifts = 0;
+      revivesUsed = 0;
+      runClean = true;
+      pendingUnlock = null;
+      petAction = '';
+      dailyMode = false;
+      rng = Math.random;
+      endlessDist = 0;
+      endlessGenX = 0;
+      endlessTier = 0;
+      endlessRock = 0;
+      endlessNewBest = false;
+      questRuns = 0;
+      questGiftCount = 0;
+      if (!save.questRuns) save.questRuns = 0;
+      prepareRunItem();            // 道具：消耗背包 1 件并注入本关效果
+      generateLevel(1);
+      state = 'playing';
+      sfx.play('click');
+      toast('♾ 无尽冲刺开始！跑得越远，奖励越多');
+    }
+
     function startRun() {
+      endlessMode = false;         // 点宠物 = 正常闯关（无尽模式必须显式切换）
       level = 1;
       runGifts = 0;
       revivesUsed = 0;
@@ -4341,7 +4969,7 @@
       debug: {
         jumpToLevel: function (n) { level = n; runGifts = 0; revivesUsed = 0; runClean = true; generateLevel(n); state = 'playing'; },
         getPlayer: function () { return player; },
-        getLevel: function () { return { level: level, width: levelWidth, platforms: platforms, hazards: hazards, stars: stars, goal: goal }; },
+        getLevel: function () { return { level: level, width: levelWidth, platforms: platforms, hazards: hazards, stars: stars, goal: goal, maxGap: lastMaxGap }; },
         getSave: function () { return save; },
         /* 暴露当前界面所有按钮的几何 + 中心点。
          * 为什么值得暴露：自动化测试如果自己硬编码坐标，一旦布局微调就全红，
@@ -4356,6 +4984,14 @@
         },
         getRunClean: function () { return runClean; },
         enterDaily: function () { enterDaily(); },
+        enterEndless: function () { startEndless(); },
+        getEndless: function () {
+          return { mode: endlessMode, dist: endlessDist, best: save.endlessBest | 0,
+                   genX: endlessGenX, tier: endlessTier, rock: endlessRock,
+                   width: levelWidth, platforms: platforms.length, hazards: hazards.length,
+                   stars: stars.length, goal: goal, runCoins: runCoins, runGifts: runGifts,
+                   maxGap: lastMaxGap };
+        },
         goTo: function (s) {
           const ok = ['cover','scores','achievements','daily','bag','sign','chest','quest',
                       'freeItem','garage','dead','cleared','paused','playing'];
@@ -4364,6 +5000,16 @@
         grantAccessories: function () { for (const a of ACCESSORIES) if (save.acc.indexOf(a.id) < 0) save.acc.push(a.id); persist(); },
         setInput: function (k, v) { if (k === 'jump' && v && !input.jump) jumpBuffer = BUFFER; input[k] = v; if (k === 'jump' && v) jumpHeld = true; },
         /* 改装 / 经济系统的测试入口 */
+        /* 暴露模式对象：自动化测试直接断言参数，不用靠随机采样猜 —— 参数对不对
+         * 是"配置问题"，不该用统计去验证（统计只能验证表现，容易假阳/假阴）。 */
+        getMode: function () { return curMode(); },
+        getAppearance: function () {
+          const lv = {};
+          for (const s of PART_SLOTS) lv[s.id] = partBestLv(s.id);
+          return { power: garagePower(), levels: lv, maxLv: PART_MAX_LV };
+        },
+        getStars: function () { return { total: starsTotal(), byLevel: JSON.parse(JSON.stringify(save.stars || {})), runStars: runStars, runGot: runStarsGot, runTotal: runStarsTotal }; },
+        getModes: function () { return MODES; },
         getCoins: function () { return save.coins | 0; },
         grantCoins: function (n) { addCoins(n); return save.coins | 0; },
         getGarage: function () {
