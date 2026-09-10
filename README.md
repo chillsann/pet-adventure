@@ -77,7 +77,6 @@
 npm i playwright && npx playwright install chromium   # 首次
 node tools/e2e-kid-requests.mjs
 ```
-```
 
 ## 目录结构
 
