@@ -476,6 +476,8 @@
     let runGrade = null;   // 本关评级 { g, color, label }（过关结算后写入）
     let dailyMode = false; // 每日挑战模式：用日期 seed 固定关卡
     let dailyKey = '';     // 今日日期 key（YYYYMMDD）
+    let questRuns = 0;     // 本局累计通关次数（每日任务追踪）
+    let questGiftCount = 0; // 本关收集礼物数（每日任务追踪）
     let coyote = 0, jumpBuffer = 0, jumpHeld = false, jumpFrames = 0;
     let screenFlash = 0;
     let bannerMsg = '';
@@ -903,9 +905,8 @@
           runCombo = Math.max(runCombo, comboCount);
           const gain = 1;
           runGifts += gain;
-          // 记录礼物收集进度（用于任务追踪）
-          if (!window._questGiftCount) window._questGiftCount = 0;
-          window._questGiftCount++;
+          // 记录本关礼物收集进度（用于每日任务追踪，结算时 bumpQuest('gift20') 读取）
+          questGiftCount++;
           // 评分：每星 30 + 连击加成（连击越高越值钱，奖励连续无伤吃星）
           const pts = 30 + (comboCount - 1) * 5;
           runScore += pts;
@@ -2380,7 +2381,9 @@
     }
 
     function drawHUD() {
-      if (state === 'cover' || state === 'room') return;
+      // cover/room 是全屏场景；cleared 是结算面板——关卡号、礼物数、评级在结算里
+      // 已经全部呈现，再叠一层 HUD 只会挤占顶部空间（成就/任务提示条正好也抢这块地）。
+      if (state === 'cover' || state === 'room' || state === 'cleared') return;
       const w = view.w;
       // 左上：关卡 + 三颗心 + 喇叭（三心机制：撞到障碍/掉坑各扣 1 心）
       panel(12, 12, 214, 46, 23);
@@ -2579,13 +2582,14 @@
         btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
       } else if (state === 'bag') {
         // 背包：3×3 卡片热区（卡片由 drawBag 绘制，这里只注册隐形命中区）
-        const bw = Math.min(150, (w - 60) / 3), gap = 12;
-        const gx = w / 2 - (3 * bw + 2 * gap) / 2, gy = h * 0.24;
+        // 几何直接复用 bagGrid，与绘制端共用同一份公式，杜绝"画的和点的不一致"
+        const bg = bagGrid(w, h);
         for (let i = 0; i < ITEMS.length; i++) {
-          const r = Math.floor(i / 3), c = i % 3;
-          btn(gx + c * (bw + gap), gy + r * (bw + gap), bw, bw, '', 'item:' + ITEMS[i].id, false, true);
+          const r = Math.floor(i / bg.cols), c = i % bg.cols;
+          btn(bg.gx + c * (bg.bw + bg.gap), bg.gy + r * (bg.bw + bg.gap), bg.bw, bg.bw,
+              '', 'item:' + ITEMS[i].id, false, true);
         }
-        btn(w / 2 - 100, h - 76, 200, 50, '返回', 'back');
+        btn(w / 2 - 100, h - 70, 200, 48, '返回', 'back');
       } else if (state === 'daily') {
         // 每日挑战：开始挑战 + 返回
         btn(w / 2 - 130, h * 0.52, 260, 54, '开始挑战', 'dailyStart');
@@ -2703,35 +2707,54 @@
       ctx.fillStyle = 'rgba(255,255,255,0.92)';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('选一只宠物，骑上载具，闯过 ' + THEMES.length + ' 大主题关卡', cx, topY + 58);
-      // 当前携带的道具：让「下一关能用」这件事在选宠这一步就被看见，而不是埋在背包里
-      const eqIt = ITEM_BY_ID[save.equipped];
-      if (eqIt && bagCount(eqIt.id) > 0) {
-        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
-        ctx.fillStyle = '#ffd24a';
-        ctx.fillText('下一关携带：' + eqIt.icon + ' ' + eqIt.name + ' · ' + eqIt.desc, cx, topY + 58);
-      }
-      // 段位系统：封面显示当前段位 + 进度条
+
+      /* 左上角信息胶囊：段位 + 下一关携带的道具
+       * 为什么放左上而不是标题下方：宠物网格底板从 topY+58 就开始铺，标题以下的纵向
+       * 空间全被网格吃掉——段位信息原先画在 topY+78/96/106，被网格盖得一个字都看不见；
+       * 「下一关携带」还和副标题撞在同一坐标互相覆盖。挪到左上角空白区后两个问题一起解决，
+       * 而且顺手把「我当前什么段位」「下一关带什么」放在选宠这一步就能扫到的位置。 */
+      let pillY = 14;
       const rk = rankOf(save.totalScore || 0);
       const nrk = nextRankOf(save.totalScore || 0);
-      ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+      const scoreNow = save.totalScore | 0;
+      const rkTxt = nrk ? ('段位 ' + rk.name + '  ' + scoreNow + '/' + nrk.need)
+                        : ('段位 ' + rk.name + ' · 已满级');
+      ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+      const rkW = Math.max(ctx.measureText(rkTxt).width + 26, 118);
+      ctx.fillStyle = 'rgba(10,8,18,0.55)';
+      roundRect(14, pillY, rkW, 30, 15); ctx.fill();
+      ctx.strokeStyle = rk.color; ctx.lineWidth = 1.5;
+      roundRect(14, pillY, rkW, 30, 15); ctx.stroke();
       ctx.fillStyle = rk.color;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('段位：' + rk.name, cx, topY + 78);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(rkTxt, 27, pillY + 12);
       if (nrk) {
-        const prog = clamp((save.totalScore - rk.need) / (nrk.need - rk.need), 0, 1);
-        ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.fillText(rk.name + ' → ' + nrk.name + '（' + (save.totalScore | 0) + '/' + nrk.need + '）', cx, topY + 96);
-        // 进度条
-        const barW = 160, barH = 8;
-        ctx.fillStyle = 'rgba(255,255,255,0.15)';
-        roundRect(cx - barW / 2, topY + 106, barW, barH, 4); ctx.fill();
+        // 胶囊内嵌进度条：段位只差多少一目了然
+        const pw = rkW - 26;
+        const prog = clamp((scoreNow - rk.need) / Math.max(1, nrk.need - rk.need), 0, 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        roundRect(27, pillY + 22, pw, 3.5, 1.75); ctx.fill();
         ctx.fillStyle = rk.color;
-        roundRect(cx - barW / 2, topY + 106, barW * prog, barH, 4); ctx.fill();
-      } else {
-        ctx.font = '12px "PingFang SC","Microsoft YaHei",sans-serif';
+        roundRect(27, pillY + 22, pw * prog, 3.5, 1.75); ctx.fill();
+      }
+      pillY += 36;
+
+      const eqIt = ITEM_BY_ID[save.equipped];
+      if (eqIt && bagCount(eqIt.id) > 0) {
+        const eqTxt = '携带 ' + eqIt.name + ' ×' + bagCount(eqIt.id);
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+        const eqW = ctx.measureText(eqTxt).width + 44;
+        ctx.fillStyle = 'rgba(10,8,18,0.55)';
+        roundRect(14, pillY, eqW, 28, 14); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,210,74,0.9)'; ctx.lineWidth = 1.5;
+        roundRect(14, pillY, eqW, 28, 14); ctx.stroke();
+        ctx.font = '15px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText(eqIt.icon, 24, pillY + 14);
+        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = '#ffd24a';
-        ctx.fillText('满级！' + rk.name, cx, topY + 96);
+        ctx.fillText(eqTxt, 44, pillY + 14);
       }
 
       // 宠物网格（几何与 buildCoverButtons 共用 coverGrid）
@@ -3004,67 +3027,76 @@
     }
 
     function drawCleared(w, h) {
-      const topY = h * 0.24;
-      gradientTitle('关卡通过！', w / 2, topY, 36);
+      /* 排版节奏（自上而下，全部以 topY 为基准）
+       *   topY+0     「关卡通过！」大标题
+       *   topY+44    评级大字 + 得分
+       *   topY+78    第 N 关 · 主题
+       *   topY+112   宠物 / 载具 / 本关礼物 / 掉落道具 —— 同一条横带左右分列
+       *   topY+150   装饰品解锁 或 房子进度（胶囊底衬，压在下沿也不糊）
+       * 按钮区从 h*0.56 起（见 overlayLayout），topY 取 h*0.20 时留够 30px 间隙。
+       * 此前 topY 取 0.24、各元素逐行下推，导致礼物行压住宠物立绘、状态行又滑进按钮区，
+       * 一屏三处碰撞——这里压缩行距并把宠物与礼物并到同一横带，一次解决。 */
+      const topY = h * 0.20;
+      gradientTitle('关卡通过！', w / 2, topY, 32);
       const cx = w / 2;
       // 评分：大字评级 + 分数（留存系统：冲 S 评级）
       const gr = runGrade || gradeFor(runScore);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.font = '900 44px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.font = '900 40px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = '#fff'; ctx.strokeStyle = gr.color; ctx.lineWidth = 6; ctx.lineJoin = 'round';
-      ctx.strokeText(gr.g, cx - 46, topY + 46);
+      ctx.strokeText(gr.g, cx - 52, topY + 44);
       ctx.fillStyle = gr.color;
-      ctx.fillText(gr.g, cx - 46, topY + 46);
+      ctx.fillText(gr.g, cx - 52, topY + 44);
+      ctx.textAlign = 'left';
       ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.textAlign = 'left';
-      ctx.fillText('得分 ' + runScore, cx - 20, topY + 40);
+      ctx.fillText('得分 ' + runScore, cx - 24, topY + 38);
       ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = gr.color;
-      ctx.fillText(gr.label + (runScore >= (save.bestScore | 0) ? ' · 新纪录！' : ''), cx - 20, topY + 60);
+      ctx.fillText(gr.label + (runScore >= (save.bestScore | 0) ? ' · 新纪录！' : ''), cx - 24, topY + 58);
       // 关卡信息
+      ctx.textAlign = 'center';
       ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.86)';
-      ctx.textAlign = 'center';
-      ctx.fillText('第 ' + level + ' 关 · ' + theme.name, cx, topY + 86);
-      // 宠物 + 载具小展示（穿戴已解锁装饰）
-      drawPetWithEq(pet.id, ctx, cx - 46, topY + 118, 0.8, 1, timeAcc, false);
-      ART.drawVehicle(vehicle.id, ctx, cx + 14, topY + 132, 1, vehicle.accent, timeAcc);
-      ctx.font = 'bold 19px "PingFang SC","Microsoft YaHei",sans-serif';
-      ctx.fillStyle = '#ffd24a';
-      drawGiftIconSmall(ctx, cx - 58, topY + 150, 14);
+      ctx.fillText('第 ' + level + ' 关 · ' + theme.name, cx, topY + 78);
+
+      // ---- 横带：左半是宠物+载具立绘，右半是本关礼物与掉落道具 ----
+      const bandY = topY + 112;
+      drawPetWithEq(pet.id, ctx, cx - 122, bandY - 2, 0.62, 1, timeAcc, false);
+      ART.drawVehicle(vehicle.id, ctx, cx - 86, bandY + 16, 0.8, vehicle.accent, timeAcc);
+      // 礼物计数
       ctx.textAlign = 'left';
-      ctx.fillText('本关礼物 ' + runGifts, cx - 38, topY + 150);
-      // 道具掉落：本关拿到了什么工具。放在礼物同一行，避免挤压下方按钮空间。
+      ctx.font = 'bold 17px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#ffd24a';
+      drawGiftIconSmall(ctx, cx - 38, bandY - 10, 13);
+      ctx.fillText('本关礼物 ' + runGifts, cx - 20, bandY - 10);
+      // 掉落道具：竖排贴在礼物下方，名字用稀有度配色，玩家一眼看出成色
       if (droppedItems.length) {
-        let dx = cx + 58;
-        ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,0.7)';
-        ctx.fillText('获得', dx, topY + 150);
-        dx += 36;
+        let dy = bandY + 14;
         for (const it of droppedItems) {
-          ctx.font = '16px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+          ctx.font = '15px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
           ctx.fillStyle = '#fff';
-          ctx.fillText(it.icon, dx, topY + 151);
-          dx += 21;
+          ctx.fillText(it.icon, cx - 38, dy);
           ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
           ctx.fillStyle = RARITY_COLOR[it.rarity];
-          ctx.fillText(it.name, dx, topY + 150);
-          dx += ctx.measureText(it.name).width + 20;
+          ctx.fillText('+ ' + it.name, cx - 18, dy);
+          dy += 21;
         }
       }
-      // 意见②：本关开出的装饰品 / 房子进度
-      ctx.font = '900 15px "PingFang SC","Microsoft YaHei",sans-serif';
-      ctx.textAlign = 'center';
-      if (pendingUnlock) {
-        ctx.fillStyle = '#7afcff';
-        ctx.fillText('🎁 开出了新装饰：' + pendingUnlock.name + '！', w / 2, topY + 174);
-      } else if (runClean && save.house >= 3) {
-        ctx.fillStyle = '#9af29a';
-        ctx.fillText('🏠 大房子建成啦！去小屋休息一下吧', w / 2, topY + 174);
-      } else if (runClean) {
-        ctx.fillStyle = '#9af29a';
-        ctx.fillText('完美通关！房子进度 ' + save.house + '/3', w / 2, topY + 174);
+
+      // 意见②：本关开出的装饰品 / 房子进度（胶囊底衬，保证压在宠物下沿也清晰）
+      const stText = pendingUnlock ? ('🎁 开出了新装饰：' + pendingUnlock.name + '！')
+        : (runClean && save.house >= 3) ? '🏠 大房子建成啦！去小屋休息一下吧'
+        : runClean ? ('完美通关！房子进度 ' + save.house + '/3') : '';
+      if (stText) {
+        ctx.textAlign = 'center';
+        ctx.font = '900 14px "PingFang SC","Microsoft YaHei",sans-serif';
+        const sy = topY + 150;
+        const sw = ctx.measureText(stText).width + 28;
+        ctx.fillStyle = 'rgba(10,8,18,0.55)';
+        roundRect(cx - sw / 2, sy - 14, sw, 28, 14); ctx.fill();
+        ctx.fillStyle = pendingUnlock ? '#7afcff' : '#9af29a';
+        ctx.fillText(stText, cx, sy);
       }
     }
 
@@ -3167,6 +3199,22 @@
     }
 
     /* ---------- 背包（道具系统 UI） ---------- */
+    /* 几何必须与 overlayLayout 的 bag 分支共用这一份公式（两处都调 bagGrid），
+     * 否则卡片画在一处、热区注册在另一处，玩家就点不准。
+     * 尺寸由「底部硬约束」反推：网格下沿 + 底部说明 必须停在「返回」按钮上方，
+     * 所以先扣掉按钮与说明占用的高度，再把剩余空间三等分——这样任何屏幕比例下
+     * 第三行都不会被返回按钮盖住（之前固定 bw=150 就踩了这个坑）。 */
+    function bagGrid(w, h) {
+      const cols = 3, rows = 3, gap = 12;
+      const topY = h * 0.20 + 44;      // 网格起始 y（标题与副标题之下）
+      const bottomReserve = 118;       // 返回按钮 48 + 间隙 + 底部说明 20 的预留
+      const availW = Math.min(w - 60, 480);
+      const availH = h - topY - bottomReserve;
+      const bw = Math.floor(Math.min((availW - (cols - 1) * gap) / cols,
+                                     (availH - (rows - 1) * gap) / rows, 138));
+      const gx = w / 2 - (cols * bw + (cols - 1) * gap) / 2;
+      return { bw: bw, gap: gap, gx: gx, gy: topY, cols: cols };
+    }
     function drawBag(w, h) {
       gradientTitle('🎒 我的背包', w / 2, h * 0.09, view.portrait ? 28 : 34);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -3174,9 +3222,8 @@
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
       ctx.fillText('点一下携带，下一关开局生效（每关消耗 1 个）', w / 2, h * 0.09 + 30);
 
-      // 几何必须与 overlayLayout 的 bag 分支完全一致，否则点不准
-      const bw = Math.min(150, (w - 60) / 3), gap = 12;
-      const gx = w / 2 - (3 * bw + 2 * gap) / 2, gy = h * 0.24;
+      const bg = bagGrid(w, h);
+      const bw = bg.bw, gap = bg.gap, gx = bg.gx, gy = bg.gy;
       for (let i = 0; i < ITEMS.length; i++) {
         const it = ITEMS[i];
         const r = Math.floor(i / 3), c = i % 3;
@@ -3213,16 +3260,18 @@
           ctx.fillText('已装备', x + bw - 29, y + 16);
         }
       }
+      // 底部说明：网格下沿再往下 22px，正好落在「返回」按钮上方的预留区里
+      const capY = gy + 3 * bw + 2 * gap + 22;
       const cur = ITEM_BY_ID[save.equipped];
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       if (cur) {
-        ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+        ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = '#ffd24a';
-        ctx.fillText('已选：' + cur.icon + ' ' + cur.name + ' — ' + cur.desc, w / 2, gy + 3 * (bw + gap) + 18);
+        ctx.fillText('已选：' + cur.icon + ' ' + cur.name + ' — ' + cur.desc, w / 2, capY);
       } else {
         ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
         ctx.fillStyle = 'rgba(255,255,255,0.55)';
-        ctx.fillText('不带道具也能跑，带了更轻松', w / 2, gy + 3 * (bw + gap) + 18);
+        ctx.fillText('不带道具也能跑，带了更轻松', w / 2, capY);
       }
     }
 
@@ -3384,11 +3433,19 @@
       ctx.globalAlpha = clamp(bannerT / 0.4, 0, 1);
       ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
       const tw = ctx.measureText(bannerMsg).width + 40;
+      // 提示条垂直位置：
+      //   有 HUD 的界面 → 紧贴 HUD 下沿（HUD 是固定像素高度，所以这里也必须写死像素，
+      //     早期用 h*0.22 在横屏正好等于 112 所以看着没问题，一到竖屏 h 变大就掉到
+      //     258 以下，直接压住背包/任务列表的第一行）
+      //   无 HUD 的界面（封面/结算）→ 直接占顶部。结算界面必须走顶部——它的
+      //     「关卡通过！」大标题就在 0.20 高度，提示条若还停在中间会正好盖住标题。
+      const hasHud = state !== 'cover' && state !== 'room' && state !== 'cleared';
+      const ty = hasHud ? 112 : 22;
       ctx.fillStyle = 'rgba(18,14,28,0.86)';
-      roundRect(w / 2 - tw / 2, view.h * 0.22, tw, 40, 20); ctx.fill();
+      roundRect(w / 2 - tw / 2, ty, tw, 40, 20); ctx.fill();
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(bannerMsg, w / 2, view.h * 0.22 + 20);
+      ctx.fillText(bannerMsg, w / 2, ty + 20);
       ctx.restore();
     }
 
@@ -3411,9 +3468,13 @@
       return null;
     }
 
-    /* 按下即触发的覆盖层按钮（覆盖层状态下点击响应） */
-    const TAP_ACTIONS = { pause: 1, resume: 1, restart: 1, retry: 1, home: 1, revive: 1, double: 1, next: 1, music: 1, sound: 1, room: 1, keepgoing: 1, tv: 1, eat: 1, sleep: 1, wearHat: 1, wearGlass: 1, wearNeck: 1, scores: 1, achievements: 1, daily: 1, dailyStart: 1, back: 1, bag: 1, sign: 1, chest: 1, quest: 1, share: 1 };
-
+    /* 覆盖层按钮的触发语义
+     * ---------------------------------------------------------------------
+     * 只有「左 / 右 / 跳」三个虚拟按键是"按住生效"，其余全部是"按下即触发"。
+     * 早期这里维护过一份 TAP_ACTIONS 白名单，结果是每新增一个入口按钮都得记得
+     * 手工登记，漏登记就会出现「按钮点了没反应」——「免费道具」入口就是这样阵亡的。
+     * 现在改成白名单的反面：默认全部按下即触发，只把三个方向键显式排除。
+     * 以后再加按钮，天然就是可点的，不会再踩同一个坑。 */
     function onPointerDown(x, y, id) {
       const b = hitButtons(x, y);
       if (!b) return;
@@ -3426,12 +3487,9 @@
       if (b.id === 'left') { touchState.left = true; syncInput(); return; }
       if (b.id === 'right') { touchState.right = true; syncInput(); return; }
       if (b.id === 'jump') { touchState.jump = true; jumpBuffer = BUFFER; jumpHeld = true; syncInput(); return; }
-      if (TAP_ACTIONS[b.id]) {
-        // 单次点击按钮：立即响应，pointerup 只做清理
-        handleButtonAction(b.id);
-        pointerMap.set(id, { id: '__consumed__' });
-        return;
-      }
+      // 其余按钮：按下即响应，pointerup 只做清理
+      handleButtonAction(b.id);
+      pointerMap.set(id, { id: '__consumed__' });
     }
 
     function onPointerMove(x, y, id) {
@@ -3457,18 +3515,17 @@
 
     function onPointerUp(x, y, id) {
       const b = pointerMap.get(id);
-      if (b && b.id !== '__consumed__') {
+      // 按下时已经触发过（tap 型按钮）→ 抬起只清理，绝不重复触发
+      if (b && b.id === '__consumed__') { pointerMap.delete(id); return; }
+      if (b) {
         // 持续按下按钮（左/右/跳）→ 抬起时释放
         releasePointer(id);
         return;
       }
-      // 兜底：若手指按下时落空的覆盖层 → 命中即触发
+      // 兜底：手指按下时落空（例如从按钮外滑入）→ 抬起命中即触发
       pointerMap.delete(id);
       const hit = hitButtons(x, y);
-      if (hit) {
-        const b2 = pointerMap.get(id) || hit;
-        if (hit.id !== 'left' && hit.id !== 'right' && hit.id !== 'jump') handleButtonAction(hit.id);
-      }
+      if (hit && hit.id !== 'left' && hit.id !== 'right' && hit.id !== 'jump') handleButtonAction(hit.id);
     }
 
     function handleButtonAction(id) {
@@ -3652,6 +3709,7 @@
      * ====================================================================== */
     let acc = 0;
     let lastT = 0;
+    let tickErrLogged = 0;   // 异常日志限流：只打印前几次，避免每帧刷屏
     function tick(nowMs) {
       if (!lastT) lastT = nowMs;
       let dt = (nowMs - lastT) / 1000;
@@ -3660,13 +3718,17 @@
       acc += dt;
       let steps = 0;
       while (acc >= FIXED_DT && steps < MAX_STEPS) {
-        step();
+        // 关键：逻辑帧异常必须就地吞掉。此前一次未捕获的 ReferenceError 会让异常
+        // 冲出 rAF 回调 → requestAnimationFrame 不再被调用 → 整局游戏永久卡死不动。
+        try { step(); }
+        catch (e) { if (tickErrLogged++ < 5) console.error('[pet-adventure] step error:', e); }
         acc -= FIXED_DT;
         steps++;
       }
       if (steps >= MAX_STEPS) acc = 0;
       if (player) player.animT += dt;
-      render();
+      try { render(); }
+      catch (e) { if (tickErrLogged++ < 5) console.error('[pet-adventure] render error:', e); }
     }
 
     /* =========================================================================
@@ -4178,7 +4240,8 @@
     if (loading && loading.parentNode) loading.parentNode.removeChild(loading);
 
     function frame(t) {
-      game.tick(t);
+      // 兜底：即使 tick 内部出现意外异常，也必须把下一帧排上，绝不让循环断掉
+      try { game.tick(t); } catch (e) { /* 内部已限流打印，这里只保证循环存活 */ }
       global.requestAnimationFrame(frame);
     }
     global.requestAnimationFrame(frame);
